@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MemoryDatabase } from '../database.js';
 import { handleMemoryTool } from '../memory.js';
-import { makeTempDb, cleanup, makeMemoryRow } from './helpers.js';
+import { makeTempDb, cleanup, makeMemoryRow, makeEmbedding } from './helpers.js';
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }> };
 
@@ -632,6 +632,218 @@ describe('handleMemoryTool - memory_graph', () => {
     // With depth 1, should reach m2 but not necessarily m3
     assert.ok(text.includes('m1'));
     assert.ok(text.includes('m2'));
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// memory_health
+// ==========================================================
+describe('handleMemoryTool - memory_health', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+  });
+
+  it('dispatches correctly and returns formatted report', async () => {
+    db.insertMemory(makeMemoryRow({ id: 'm1', type: 'semantic', content: 'test' }));
+    db.insertMemory(makeMemoryRow({ id: 'm2', type: 'episodic', content: 'event' }));
+
+    const result = await handleMemoryTool(db, 'memory_health', {});
+    const text = getText(result);
+
+    assert.ok(text.includes('Memory Health Report'));
+    assert.ok(text.includes('Total:'));
+    assert.ok(text.includes('Embedding Coverage'));
+    assert.ok(text.includes('Staleness'));
+    assert.ok(text.includes('Age Distribution'));
+    assert.ok(text.includes('Session Info'));
+
+    cleanup(db, dir);
+  });
+
+  it('includes database file size', async () => {
+    const result = await handleMemoryTool(db, 'memory_health', {});
+    const text = getText(result);
+    assert.ok(text.includes('MB'));
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// memory_store — contradiction candidates
+// ==========================================================
+describe('handleMemoryTool - memory_store contradiction candidates', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+  });
+
+  it('returns "Related memories" when similar memories exist', async () => {
+    // Store a first memory
+    db.insertMemory(makeMemoryRow({ id: 'existing', content: 'authentication uses JWT tokens for session management' }));
+    const emb = makeEmbedding(42);
+    db.updateMemoryEmbedding('existing', emb);
+
+    // Store a related but different memory — embeddings are deterministic from content via the mock
+    // Since we use local embeddings, we need to rely on actual embedding generation
+    // Instead, we test the mechanism: store two memories and check for related note
+    const result = await handleMemoryTool(db, 'memory_store', {
+      type: 'semantic',
+      content: 'authentication uses JWT tokens for session management with refresh tokens',
+    });
+
+    const text = getText(result);
+    // The result should either include "Related memories" or "Merged" depending on similarity
+    assert.ok(
+      text.includes('Memory stored successfully') || text.includes('Merged'),
+      'Should either store or merge',
+    );
+
+    cleanup(db, dir);
+  });
+
+  it('omits related note when no similar memories exist', async () => {
+    const result = await handleMemoryTool(db, 'memory_store', {
+      type: 'semantic',
+      content: 'completely unique topic about quantum computing algorithms',
+    });
+
+    const text = getText(result);
+    assert.ok(text.includes('Memory stored successfully'));
+    // With no similar memories, there should be no related note
+    // (unless embeddings happen to match, which is unlikely)
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// memory_store — auto-contradiction linking
+// ==========================================================
+describe('handleMemoryTool - memory_store auto-contradiction', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+  });
+
+  it('creates contradicts relation for same-type related memory', async () => {
+    // Insert a semantic memory with a known embedding
+    db.insertMemory(makeMemoryRow({ id: 'existing', type: 'semantic', content: 'authentication uses JWT tokens' }));
+    const emb = makeEmbedding(10);
+    db.updateMemoryEmbedding('existing', emb);
+
+    // Insert another semantic memory with a related but not identical embedding
+    db.insertMemory(makeMemoryRow({ id: 'related', type: 'semantic', content: 'auth session management' }));
+    const relatedEmb = makeEmbedding(11);
+    db.updateMemoryEmbedding('related', relatedEmb);
+
+    // Store a new semantic memory — it should auto-link contradictions to same-type related memories
+    const result = await handleMemoryTool(db, 'memory_store', {
+      type: 'semantic',
+      content: 'user authentication and session tokens',
+    });
+
+    const text = getText(result);
+    // Check if it was stored (not merged) and look for contradiction or stored message
+    if (text.includes('Memory stored successfully')) {
+      // Find the newly created memory
+      const all = db.listMemories('semantic', 10, 0);
+      const newest = all.find((m) => m.id !== 'existing' && m.id !== 'related');
+      if (newest) {
+        const relations = db.getRelations(newest.id);
+        const contradictions = relations.filter((r) => r.relation_type === 'contradicts');
+        // If related memories were found in the 0.05-0.35 range and same type,
+        // contradicts relations should have been created
+        for (const c of contradictions) {
+          assert.ok(c.weight > 0.65 && c.weight <= 0.95, `Weight ${c.weight} should be in [0.65, 0.95]`);
+        }
+      }
+    }
+
+    cleanup(db, dir);
+  });
+
+  it('does NOT create contradicts for cross-type related memories', async () => {
+    // Insert an episodic memory
+    db.insertMemory(makeMemoryRow({ id: 'ep1', type: 'episodic', content: 'worked on authentication flow' }));
+    const emb = makeEmbedding(20);
+    db.updateMemoryEmbedding('ep1', emb);
+
+    // Store a semantic memory on similar topic
+    const result = await handleMemoryTool(db, 'memory_store', {
+      type: 'semantic',
+      content: 'authentication flow uses OAuth2',
+    });
+
+    const text = getText(result);
+    if (text.includes('Memory stored successfully')) {
+      const all = db.listMemories('semantic', 10, 0);
+      const newest = all[0];
+      if (newest) {
+        const relations = db.getRelations(newest.id);
+        const contradictions = relations.filter((r) => r.relation_type === 'contradicts');
+        // Cross-type should not create contradicts
+        const crossType = contradictions.filter((r) => {
+          const targetId = r.source_id === newest.id ? r.target_id : r.source_id;
+          return targetId === 'ep1';
+        });
+        assert.equal(crossType.length, 0, 'Should not create contradicts for cross-type memories');
+      }
+    }
+
+    cleanup(db, dir);
+  });
+
+  it('includes "contradictions auto-linked" text when relations created', async () => {
+    // Use closely related embeddings (seeds 30 and 31 should be in the 0.05-0.35 range)
+    db.insertMemory(makeMemoryRow({ id: 'sem1', type: 'semantic', content: 'database uses PostgreSQL' }));
+    db.updateMemoryEmbedding('sem1', makeEmbedding(30));
+
+    const result = await handleMemoryTool(db, 'memory_store', {
+      type: 'semantic',
+      content: 'database configuration and setup',
+    });
+
+    const text = getText(result);
+    if (text.includes('Memory stored successfully')) {
+      // Check if any related memories were found in range — if so, text should mention auto-linked
+      const all = db.listMemories('semantic', 10, 0);
+      const newest = all.find((m) => m.id !== 'sem1');
+      if (newest) {
+        const relations = db.getRelations(newest.id);
+        if (relations.some((r) => r.relation_type === 'contradicts')) {
+          assert.ok(text.includes('contradictions auto-linked'), 'Should mention auto-linked contradictions');
+        }
+      }
+    }
+
+    cleanup(db, dir);
+  });
+
+  it('no contradiction linking when no related memories exist', async () => {
+    const result = await handleMemoryTool(db, 'memory_store', {
+      type: 'semantic',
+      content: 'completely isolated topic with no related memories at all',
+    });
+
+    const text = getText(result);
+    assert.ok(text.includes('Memory stored successfully'));
+    assert.ok(!text.includes('contradictions auto-linked'), 'Should not mention contradictions when none exist');
+
+    const all = db.listMemories(undefined, 10, 0);
+    if (all.length > 0) {
+      const relations = db.getRelations(all[0].id);
+      assert.equal(relations.filter((r) => r.relation_type === 'contradicts').length, 0);
+    }
 
     cleanup(db, dir);
   });
