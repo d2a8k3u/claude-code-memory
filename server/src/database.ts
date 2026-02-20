@@ -136,7 +136,7 @@ export class MemoryDatabase {
     id: string,
     updates: Partial<Pick<MemoryRow, 'title' | 'content' | 'context' | 'source' | 'tags' | 'importance'>>,
   ): MemoryRow | null {
-    const existing = this.getMemoryById(id);
+    const existing = this.getMemoryByIdRaw(id);
     if (!existing) return null;
 
     const now = new Date().toISOString();
@@ -172,7 +172,7 @@ export class MemoryDatabase {
       this.db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = @id`).run(params);
 
       this.db.prepare('DELETE FROM memories_fts WHERE rowid = (SELECT rowid FROM memories WHERE id = ?)').run(id);
-      const updated = this.getMemoryById(id)!;
+      const updated = this.getMemoryByIdRaw(id)!;
       this.db
         .prepare(
           `INSERT INTO memories_fts (rowid, title, content, tags)
@@ -181,14 +181,25 @@ export class MemoryDatabase {
         .run(id, updated.title ?? '', updated.content, updated.tags);
     });
     tx();
-    return this.getMemoryById(id);
+    return this.getMemoryByIdRaw(id);
+  }
+
+  getMemoryByIdRaw(id: string): MemoryRow | null {
+    return this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as MemoryRow | undefined ?? null;
+  }
+
+  get path(): string {
+    return this.db.name;
   }
 
   getMemoryById(id: string): MemoryRow | null {
     const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as MemoryRow | undefined;
     if (!row) return null;
     this.db
-      .prepare('UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?')
+      .prepare(
+        `UPDATE memories SET access_count = access_count + 1, last_accessed = ?,
+         importance = MIN(0.95, importance + 0.01) WHERE id = ?`,
+      )
       .run(new Date().toISOString(), id);
     return row;
   }
@@ -383,7 +394,7 @@ export class MemoryDatabase {
       }
     }
 
-    const nodes = [...visited].map((nid) => this.getMemoryById(nid)).filter((n): n is MemoryRow => n !== null);
+    const nodes = [...visited].map((nid) => this.getMemoryByIdRaw(nid)).filter((n): n is MemoryRow => n !== null);
 
     const uniqueRelations = allRelations.filter(
       (rel, idx, arr) =>
@@ -481,16 +492,55 @@ export class MemoryDatabase {
 
   decayImportance(daysThreshold: number, decayAmount: number): number {
     const cutoff = new Date(Date.now() - daysThreshold * 24 * 60 * 60 * 1000).toISOString();
-    const result = this.db
+    const stmtFull = this.db.prepare(
+      `UPDATE memories
+       SET importance = MAX(0.1, importance - ?)
+       WHERE (last_accessed IS NULL OR last_accessed < ?)
+         AND importance > 0.1
+         AND type NOT IN ('working')
+         AND access_count <= 5`,
+    );
+    const stmtHalf = this.db.prepare(
+      `UPDATE memories
+       SET importance = MAX(0.1, importance - ?)
+       WHERE (last_accessed IS NULL OR last_accessed < ?)
+         AND importance > 0.1
+         AND type NOT IN ('working')
+         AND access_count > 5 AND access_count <= 10`,
+    );
+    const stmtQuarter = this.db.prepare(
+      `UPDATE memories
+       SET importance = MAX(0.1, importance - ?)
+       WHERE (last_accessed IS NULL OR last_accessed < ?)
+         AND importance > 0.1
+         AND type NOT IN ('working')
+         AND access_count > 10`,
+    );
+    const r1 = stmtFull.run(decayAmount, cutoff);
+    const r2 = stmtHalf.run(decayAmount * 0.5, cutoff);
+    const r3 = stmtQuarter.run(decayAmount * 0.25, cutoff);
+    return r1.changes + r2.changes + r3.changes;
+  }
+
+  findRelatedMemories(embedding: Float32Array, limit = 5): { id: string; distance: number }[] {
+    const rows = this.db
       .prepare(
-        `UPDATE memories
-         SET importance = MAX(0.1, importance - ?)
-         WHERE (last_accessed IS NULL OR last_accessed < ?)
-           AND importance > 0.1
-           AND type NOT IN ('working')`,
+        `SELECT v.vec_rowid, v.distance, m.id
+         FROM (
+           SELECT rowid AS vec_rowid, distance
+           FROM memories_vec
+           WHERE embedding MATCH ?
+           ORDER BY distance
+           LIMIT ?
+         ) v
+         JOIN memories m ON m.rowid = v.vec_rowid`,
       )
-      .run(decayAmount, cutoff);
-    return result.changes;
+      .all(embedding, limit + 5) as { id: string; distance: number; vec_rowid: number }[];
+
+    return rows
+      .filter((r) => r.distance >= 0.05 && r.distance < 0.35)
+      .slice(0, limit)
+      .map(({ id, distance }) => ({ id, distance }));
   }
 
   findSimilarMemory(embedding: Float32Array, threshold = 0.05): { id: string; distance: number } | null {
@@ -531,6 +581,140 @@ export class MemoryDatabase {
       .all(type, minImportance, limit) as MemoryRow[];
   }
 
+  // --- Health & Curation ---
+
+  getHealthStats(): {
+    total: number;
+    byType: Record<string, number>;
+    withEmbedding: number;
+    withoutEmbedding: number;
+    staleCount: number;
+    ageDistribution: { last24h: number; last7d: number; last30d: number; older: number };
+    sessionCount: number;
+    lastConsolidation: number;
+  } {
+    const total = this.countMemories();
+
+    const typeRows = this.db
+      .prepare('SELECT type, COUNT(*) as count FROM memories GROUP BY type')
+      .all() as { type: string; count: number }[];
+    const byType: Record<string, number> = {};
+    for (const row of typeRows) byType[row.type] = row.count;
+
+    const withEmbedding = (
+      this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE embedding IS NOT NULL').get() as { count: number }
+    ).count;
+    const withoutEmbedding = total - withEmbedding;
+
+    const staleCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const staleCount = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) as count FROM memories
+           WHERE importance < 0.2 AND access_count < 2
+             AND created_at < ? AND type != 'working'`,
+        )
+        .get(staleCutoff) as { count: number }
+    ).count;
+
+    const now = Date.now();
+    const d24h = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+    const d7d = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const d30d = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const last24h = (
+      this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE created_at >= ?').get(d24h) as { count: number }
+    ).count;
+    const last7d = (
+      this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE created_at >= ? AND created_at < ?').get(d7d, d24h) as { count: number }
+    ).count;
+    const last30d = (
+      this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE created_at >= ? AND created_at < ?').get(d30d, d7d) as { count: number }
+    ).count;
+    const older = total - last24h - last7d - last30d;
+
+    const sessionCount = parseInt(this.getSessionMeta('session_count') ?? '0', 10);
+    const lastConsolidation = parseInt(this.getSessionMeta('last_consolidation') ?? '0', 10);
+
+    return {
+      total,
+      byType,
+      withEmbedding,
+      withoutEmbedding,
+      staleCount,
+      ageDistribution: { last24h, last7d, last30d, older },
+      sessionCount,
+      lastConsolidation,
+    };
+  }
+
+  getCurationStats(): {
+    total: number;
+    byType: Record<string, number>;
+    staleCount: number;
+    duplicateCandidateCount: number;
+  } {
+    const total = this.countMemories();
+
+    const typeRows = this.db
+      .prepare('SELECT type, COUNT(*) as count FROM memories GROUP BY type')
+      .all() as { type: string; count: number }[];
+    const byType: Record<string, number> = {};
+    for (const row of typeRows) byType[row.type] = row.count;
+
+    const staleCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const staleCount = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) as count FROM memories
+           WHERE importance < 0.2 AND access_count < 2
+             AND created_at < ? AND type != 'working'`,
+        )
+        .get(staleCutoff) as { count: number }
+    ).count;
+
+    // Sample recent memories with embeddings to find near-duplicates
+    let duplicateCandidateCount = 0;
+    const sampleRows = this.db
+      .prepare(
+        `SELECT id, embedding FROM memories
+         WHERE embedding IS NOT NULL
+         ORDER BY created_at DESC LIMIT 50`,
+      )
+      .all() as { id: string; embedding: Buffer }[];
+
+    const seenPairs = new Set<string>();
+    for (const row of sampleRows) {
+      const emb = bufferToEmbedding(row.embedding);
+      const neighbors = this.db
+        .prepare(
+          `SELECT v.distance, m.id
+           FROM (
+             SELECT rowid AS vec_rowid, distance
+             FROM memories_vec
+             WHERE embedding MATCH ?
+             ORDER BY distance
+             LIMIT 3
+           ) v
+           JOIN memories m ON m.rowid = v.vec_rowid`,
+        )
+        .all(emb) as { id: string; distance: number }[];
+
+      for (const n of neighbors) {
+        if (n.id === row.id) continue;
+        if (n.distance >= 0.05 && n.distance < 0.10) {
+          const pairKey = [row.id, n.id].sort().join(':');
+          if (!seenPairs.has(pairKey)) {
+            seenPairs.add(pairKey);
+            duplicateCandidateCount++;
+          }
+        }
+      }
+    }
+
+    return { total, byType, staleCount, duplicateCandidateCount };
+  }
+
   // --- Meta ---
 
   getSessionMeta(key: string): string | null {
@@ -543,6 +727,7 @@ export class MemoryDatabase {
   }
 
   close(): void {
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
     this.db.close();
   }
 }

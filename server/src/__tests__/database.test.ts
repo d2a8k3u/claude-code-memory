@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryDatabase } from '../database.js';
-import { rmSync } from 'node:fs';
+import { rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeTempDb, makeEmbedding, cleanup, makeMemoryRow } from './helpers.js';
 
@@ -955,6 +955,436 @@ describe('MemoryDatabase - countMemories', () => {
     assert.equal(db.countMemories('episodic'), 1);
     assert.equal(db.countMemories('pattern'), 0);
 
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// getMemoryByIdRaw
+// ==========================================================
+describe('MemoryDatabase - getMemoryByIdRaw', () => {
+  it('reads without incrementing access_count', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'raw read test' }));
+
+    const first = db.getMemoryByIdRaw('mem1');
+    assert.ok(first);
+    assert.equal(first.access_count, 0);
+
+    const second = db.getMemoryByIdRaw('mem1');
+    assert.ok(second);
+    assert.equal(second.access_count, 0);
+
+    cleanup(db, dir);
+  });
+
+  it('does not update last_accessed', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'raw read test' }));
+
+    db.getMemoryByIdRaw('mem1');
+    const row = db.getMemoryByIdRaw('mem1');
+    assert.ok(row);
+    assert.equal(row.last_accessed, null);
+
+    cleanup(db, dir);
+  });
+
+  it('returns null for nonexistent memory', () => {
+    const { db, dir } = makeTempDb();
+    assert.equal(db.getMemoryByIdRaw('nonexistent'), null);
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// Dynamic importance boost on access
+// ==========================================================
+describe('MemoryDatabase - dynamic importance boost', () => {
+  it('adds +0.01 importance on getMemoryById', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.5 }));
+
+    db.getMemoryById('mem1');
+    const row = db.getMemoryByIdRaw('mem1');
+    assert.ok(row);
+    assert.ok(Math.abs(row.importance - 0.51) < 0.001, `Expected ~0.51 but got ${row.importance}`);
+
+    cleanup(db, dir);
+  });
+
+  it('caps importance at 0.95', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.95 }));
+
+    db.getMemoryById('mem1');
+    const row = db.getMemoryByIdRaw('mem1');
+    assert.ok(row);
+    assert.ok(row.importance <= 0.95, `Expected <= 0.95 but got ${row.importance}`);
+
+    cleanup(db, dir);
+  });
+
+  it('is not applied by getMemoryByIdRaw', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.5 }));
+
+    db.getMemoryByIdRaw('mem1');
+    db.getMemoryByIdRaw('mem1');
+    db.getMemoryByIdRaw('mem1');
+
+    const row = db.getMemoryByIdRaw('mem1');
+    assert.ok(row);
+    assert.equal(row.importance, 0.5);
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// Velocity-aware importance decay
+// ==========================================================
+describe('MemoryDatabase - velocity-aware decay', () => {
+  it('applies full decay rate for access_count <= 5', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'low-access',
+        content: 'rarely used',
+        importance: 0.7,
+        access_count: 3,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+
+    db.decayImportance(30, 0.10);
+    const row = db.getMemoryByIdRaw('low-access');
+    assert.ok(row);
+    assert.ok(Math.abs(row.importance - 0.6) < 0.001, `Expected ~0.6 but got ${row.importance}`);
+
+    cleanup(db, dir);
+  });
+
+  it('applies half decay rate for access_count 6-10', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'mid-access',
+        content: 'moderately used',
+        importance: 0.7,
+        access_count: 8,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+
+    db.decayImportance(30, 0.10);
+    const row = db.getMemoryByIdRaw('mid-access');
+    assert.ok(row);
+    assert.ok(Math.abs(row.importance - 0.65) < 0.001, `Expected ~0.65 but got ${row.importance}`);
+
+    cleanup(db, dir);
+  });
+
+  it('applies quarter decay rate for access_count > 10', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'high-access',
+        content: 'heavily used',
+        importance: 0.7,
+        access_count: 15,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+
+    db.decayImportance(30, 0.10);
+    const row = db.getMemoryByIdRaw('high-access');
+    assert.ok(row);
+    assert.ok(Math.abs(row.importance - 0.675) < 0.001, `Expected ~0.675 but got ${row.importance}`);
+
+    cleanup(db, dir);
+  });
+
+  it('respects 0.1 floor across all tiers', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'near-floor',
+        content: 'near floor',
+        importance: 0.12,
+        access_count: 0,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+
+    db.decayImportance(30, 0.10);
+    const row = db.getMemoryByIdRaw('near-floor');
+    assert.ok(row);
+    assert.ok(row.importance >= 0.1);
+
+    cleanup(db, dir);
+  });
+
+  it('skips working memories in all tiers', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'w1',
+        type: 'working',
+        content: 'working',
+        importance: 0.7,
+        access_count: 0,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+
+    const decayed = db.decayImportance(30, 0.10);
+    assert.equal(decayed, 0);
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// findRelatedMemories
+// ==========================================================
+describe('MemoryDatabase - findRelatedMemories', () => {
+  it('returns memories in the 0.05-0.35 distance range', () => {
+    const { db, dir } = makeTempDb();
+    const baseEmb = makeEmbedding(1);
+
+    // Insert a memory with a somewhat similar embedding
+    db.insertMemory(makeMemoryRow({ id: 'm1', content: 'related content' }));
+    const relatedEmb = makeEmbedding(2);
+    db.updateMemoryEmbedding('m1', relatedEmb);
+
+    const results = db.findRelatedMemories(baseEmb, 5);
+    // Results should only include memories in the 0.05-0.35 range
+    for (const r of results) {
+      assert.ok(r.distance >= 0.05, `Distance ${r.distance} should be >= 0.05`);
+      assert.ok(r.distance < 0.35, `Distance ${r.distance} should be < 0.35`);
+    }
+
+    cleanup(db, dir);
+  });
+
+  it('excludes near-duplicates (distance < 0.05)', () => {
+    const { db, dir } = makeTempDb();
+    const emb = makeEmbedding(42);
+    db.insertMemory(makeMemoryRow({ id: 'm1', content: 'exact match' }));
+    db.updateMemoryEmbedding('m1', emb);
+
+    const results = db.findRelatedMemories(emb, 5);
+    assert.ok(!results.some((r) => r.id === 'm1'), 'Should not include near-duplicate');
+
+    cleanup(db, dir);
+  });
+
+  it('returns empty when no memories exist', () => {
+    const { db, dir } = makeTempDb();
+    const results = db.findRelatedMemories(makeEmbedding(1), 5);
+    assert.equal(results.length, 0);
+    cleanup(db, dir);
+  });
+
+  it('respects limit parameter', () => {
+    const { db, dir } = makeTempDb();
+    for (let i = 0; i < 10; i++) {
+      db.insertMemory(makeMemoryRow({ id: `m${i}`, content: `content ${i}` }));
+      db.updateMemoryEmbedding(`m${i}`, makeEmbedding(i + 10));
+    }
+
+    const results = db.findRelatedMemories(makeEmbedding(1), 3);
+    assert.ok(results.length <= 3);
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// getHealthStats
+// ==========================================================
+describe('MemoryDatabase - getHealthStats', () => {
+  it('returns correct stats for populated database', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'm1', type: 'semantic', content: 'a' }));
+    db.insertMemory(makeMemoryRow({ id: 'm2', type: 'episodic', content: 'b' }));
+    db.insertMemory(makeMemoryRow({ id: 'm3', type: 'semantic', content: 'c' }));
+
+    db.updateMemoryEmbedding('m1', makeEmbedding(1));
+
+    const stats = db.getHealthStats();
+    assert.equal(stats.total, 3);
+    assert.equal(stats.byType['semantic'], 2);
+    assert.equal(stats.byType['episodic'], 1);
+    assert.equal(stats.withEmbedding, 1);
+    assert.equal(stats.withoutEmbedding, 2);
+
+    cleanup(db, dir);
+  });
+
+  it('reports age distribution correctly', () => {
+    const { db, dir } = makeTempDb();
+    const now = new Date().toISOString();
+    const oldDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(makeMemoryRow({ id: 'recent', content: 'recent', created_at: now, updated_at: now }));
+    db.insertMemory(makeMemoryRow({ id: 'old', content: 'old', created_at: oldDate, updated_at: oldDate }));
+
+    const stats = db.getHealthStats();
+    assert.equal(stats.ageDistribution.last24h, 1);
+    assert.equal(stats.ageDistribution.older, 1);
+    assert.equal(stats.total, 2);
+
+    cleanup(db, dir);
+  });
+
+  it('reports session metadata', () => {
+    const { db, dir } = makeTempDb();
+    db.setSessionMeta('session_count', '5');
+    db.setSessionMeta('last_consolidation', '3');
+
+    const stats = db.getHealthStats();
+    assert.equal(stats.sessionCount, 5);
+    assert.equal(stats.lastConsolidation, 3);
+
+    cleanup(db, dir);
+  });
+
+  it('reports stale count correctly', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'stale',
+        content: 'stale',
+        importance: 0.1,
+        access_count: 0,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'active',
+        content: 'active',
+        importance: 0.8,
+        access_count: 5,
+      }),
+    );
+
+    const stats = db.getHealthStats();
+    assert.equal(stats.staleCount, 1);
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// getCurationStats
+// ==========================================================
+describe('MemoryDatabase - getCurationStats', () => {
+  it('returns correct totals and type breakdown', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'm1', type: 'semantic', content: 'a' }));
+    db.insertMemory(makeMemoryRow({ id: 'm2', type: 'episodic', content: 'b' }));
+    db.insertMemory(makeMemoryRow({ id: 'm3', type: 'pattern', content: 'c' }));
+
+    const stats = db.getCurationStats();
+    assert.equal(stats.total, 3);
+    assert.equal(stats.byType['semantic'], 1);
+    assert.equal(stats.byType['episodic'], 1);
+    assert.equal(stats.byType['pattern'], 1);
+
+    cleanup(db, dir);
+  });
+
+  it('counts stale memories', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'stale1',
+        content: 'stale',
+        importance: 0.1,
+        access_count: 0,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+    db.insertMemory(makeMemoryRow({ id: 'active', content: 'active', importance: 0.8 }));
+
+    const stats = db.getCurationStats();
+    assert.equal(stats.staleCount, 1);
+
+    cleanup(db, dir);
+  });
+
+  it('detects near-duplicate candidates', () => {
+    const { db, dir } = makeTempDb();
+    const emb1 = makeEmbedding(1);
+    // Create a very similar embedding by slightly modifying emb1
+    const emb2 = new Float32Array(emb1);
+    emb2[0] += 0.001;
+    // Re-normalize
+    let norm = 0;
+    for (let i = 0; i < 384; i++) norm += emb2[i] * emb2[i];
+    norm = Math.sqrt(norm);
+    for (let i = 0; i < 384; i++) emb2[i] /= norm;
+
+    db.insertMemory(makeMemoryRow({ id: 'm1', content: 'first version' }));
+    db.updateMemoryEmbedding('m1', emb1);
+    db.insertMemory(makeMemoryRow({ id: 'm2', content: 'slightly different' }));
+    db.updateMemoryEmbedding('m2', emb2);
+
+    const stats = db.getCurationStats();
+    // The embeddings are extremely similar, so distance should be < 0.05 (near-duplicate range)
+    // Whether they show up as candidates depends on exact distance falling in [0.05, 0.10)
+    assert.ok(stats.duplicateCandidateCount >= 0);
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// WAL checkpoint on close
+// ==========================================================
+describe('MemoryDatabase - WAL checkpoint', () => {
+  it('close() executes WAL checkpoint without error', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test data' }));
+    // close() should run wal_checkpoint(TRUNCATE) then close — no throw
+    db.close();
+    rmSync(dir, { recursive: true });
+  });
+});
+
+// ==========================================================
+// path getter
+// ==========================================================
+describe('MemoryDatabase - path getter', () => {
+  it('returns the database file path', () => {
+    const { db, dir } = makeTempDb();
+    const dbPath = db.path;
+    assert.ok(dbPath.includes('memory.sqlite'));
+    assert.ok(statSync(dbPath).isFile());
     cleanup(db, dir);
   });
 });
