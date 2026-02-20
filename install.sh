@@ -89,7 +89,7 @@ const hooks = {
       hooks: [
         {
           type: 'command',
-          command: 'node ' + pluginDir + '/hooks/scripts/session-start.js',
+          command: 'node ' + pluginDir + '/server/dist/cli.js session-start',
           statusMessage: 'Loading project memory...',
           timeout: 15,
         },
@@ -102,7 +102,7 @@ const hooks = {
       hooks: [
         {
           type: 'command',
-          command: 'node ' + pluginDir + '/hooks/scripts/post-tool-use.js',
+          command: 'node ' + pluginDir + '/server/dist/cli.js error-context',
           timeout: 5,
         },
       ],
@@ -113,7 +113,7 @@ const hooks = {
       hooks: [
         {
           type: 'command',
-          command: 'node ' + pluginDir + '/hooks/scripts/session-end.js',
+          command: 'node ' + pluginDir + '/server/dist/cli.js session-end',
           statusMessage: 'Saving session memory...',
           timeout: 15,
         },
@@ -130,7 +130,7 @@ for (const [event, newEntries] of Object.entries(hooks)) {
   // Remove old claude-memory hook entries
   const filtered = existing.filter(entry => {
     const cmds = (entry.hooks || []).map(h => h.command || '');
-    return !cmds.some(c => c.includes('claude-memory/hooks/scripts/'));
+    return !cmds.some(c => c.includes('claude-memory/hooks/scripts/') || c.includes('claude-memory/server/dist/cli.js'));
   });
   settings.hooks[event] = [...filtered, ...newEntries];
 }

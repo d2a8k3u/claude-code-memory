@@ -514,6 +514,23 @@ export class MemoryDatabase {
     return null;
   }
 
+  // --- Convenience Queries ---
+
+  getRecentByType(type: string, limit: number): MemoryRow[] {
+    return this.db
+      .prepare('SELECT * FROM memories WHERE type = ? ORDER BY created_at DESC LIMIT ?')
+      .all(type, limit) as MemoryRow[];
+  }
+
+  getTopByImportance(type: string, minImportance: number, limit: number): MemoryRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM memories WHERE type = ? AND importance >= ?
+         ORDER BY importance DESC, access_count DESC LIMIT ?`,
+      )
+      .all(type, minImportance, limit) as MemoryRow[];
+  }
+
   // --- Meta ---
 
   getSessionMeta(key: string): string | null {
