@@ -455,7 +455,7 @@ describe('handleMemoryTool - memory_store_batch', () => {
     });
 
     const text = getText(result);
-    assert.ok(text.includes('Batch stored 3 memories'));
+    assert.ok(text.includes('Batch stored 3 new, 0 merged'));
     assert.equal(db.countMemories(), 3);
 
     cleanup(db, dir);

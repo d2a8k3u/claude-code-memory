@@ -278,6 +278,73 @@ describe('Integration: Deduplication', { timeout: 120_000 }, () => {
 });
 
 // ==========================================================
+// 5b. Batch Deduplication
+// ==========================================================
+describe('Integration: Batch Deduplication', { timeout: 120_000 }, () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+  });
+  afterEach(() => cleanup(db, dir));
+
+  it('within-batch duplicates collapse to one insert', async () => {
+    const result = await timed('batch with within-batch duplicate', () =>
+      handleMemoryTool(db, 'memory_store_batch', {
+        memories: [
+          { type: 'semantic', content: 'Docker containers provide lightweight isolated environments for applications', tags: ['docker'] },
+          { type: 'semantic', content: 'Docker containers provide lightweight isolated environments for applications', tags: ['containers'] },
+        ],
+      }),
+    );
+    const resultText = getText(result);
+    assert.ok(resultText.includes('1 new, 1 merged'), `Expected 1 new + 1 merged, got: ${resultText}`);
+    assert.equal(db.countMemories(), 1, 'Should have only 1 memory after within-batch dedup');
+
+    const ids = extractBatchIds(resultText);
+    assert.equal(ids.length, 2, 'Should have 2 resolved IDs (one per input)');
+    assert.equal(ids[0], ids[1], 'Both resolved IDs should be the same');
+  });
+
+  it('DB duplicates merge into existing', async () => {
+    // Pre-insert a memory
+    const preInsert = await timed('pre-insert memory', () =>
+      handleMemoryTool(db, 'memory_store', {
+        type: 'semantic',
+        content: 'Docker containers provide lightweight isolated environments for applications',
+        tags: ['docker'],
+      }),
+    );
+    const preId = extractId(getText(preInsert));
+    assert.equal(db.countMemories(), 1);
+
+    // Batch with one duplicate + one new
+    const result = await timed('batch with DB duplicate', () =>
+      handleMemoryTool(db, 'memory_store_batch', {
+        memories: [
+          { type: 'semantic', content: 'Docker containers provide lightweight isolated environments for applications', tags: ['containers'] },
+          { type: 'semantic', content: 'Kubernetes orchestrates container deployments across clusters', tags: ['k8s'] },
+        ],
+      }),
+    );
+    const resultText = getText(result);
+    assert.ok(resultText.includes('1 new, 1 merged'), `Expected 1 new + 1 merged, got: ${resultText}`);
+    assert.equal(db.countMemories(), 2, 'Should have 2 total memories');
+
+    const ids = extractBatchIds(resultText);
+    assert.equal(ids[0], preId, 'First resolved ID should match pre-inserted memory');
+
+    // Verify tags were unioned on the merged memory
+    const merged = db.getMemoryById(preId);
+    assert.ok(merged, 'Merged memory should exist');
+    const mergedTags: string[] = JSON.parse(merged.tags);
+    assert.ok(mergedTags.includes('docker'), 'Should retain original tag');
+    assert.ok(mergedTags.includes('containers'), 'Should include new tag from batch');
+  });
+});
+
+// ==========================================================
 // 6. Batch Store + Search
 // ==========================================================
 describe('Integration: Batch Store', { timeout: 120_000 }, () => {
@@ -301,7 +368,7 @@ describe('Integration: Batch Store', { timeout: 120_000 }, () => {
       }),
     );
     const batchText = getText(batchResult);
-    assert.ok(batchText.includes('Batch stored 4 memories'), `Batch failed: ${batchText}`);
+    assert.ok(batchText.includes('Batch stored 4 new, 0 merged'), `Batch failed: ${batchText}`);
     const ids = extractBatchIds(batchText);
     assert.equal(ids.length, 4);
 

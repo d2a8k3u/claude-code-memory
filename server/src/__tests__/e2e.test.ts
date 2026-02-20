@@ -232,16 +232,16 @@ describe('E2E: Deduplication / Auto-Merge', { timeout: 60_000 }, () => {
     assert.ok(dupText.includes(originalId));
     assert.equal(db.countMemories(), 1);
 
-    // Store similar but distinct (same content + title changes embedding) → should warn
+    // Store similar content with title → should also merge (single 0.05 threshold)
     const similar = await handleMemoryTool(db, 'memory_store', {
       type: 'semantic',
       content: 'TypeScript supports union types and intersection types',
       title: 'TypeScript Type System',
     });
     const similarText = getText(similar);
-    assert.ok(similarText.includes('Warning') && similarText.includes('Similar memory exists'),
-      `Expected similarity warning, got: ${similarText}`);
-    assert.equal(db.countMemories(), 2);
+    assert.ok(similarText.includes('Merged with existing memory'),
+      `Expected merge, got: ${similarText}`);
+    assert.equal(db.countMemories(), 1);
   });
 });
 
@@ -352,7 +352,7 @@ describe('E2E: Batch Store + Search', { timeout: 60_000 }, () => {
       ],
     });
     const batchText = getText(batchResult);
-    assert.ok(batchText.includes('Batch stored 4 memories'));
+    assert.ok(batchText.includes('Batch stored 4 new, 0 merged'));
     const ids = extractBatchIds(batchText);
     assert.equal(ids.length, 4);
 

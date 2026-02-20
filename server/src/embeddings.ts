@@ -14,11 +14,17 @@ type Pipeline = (
 
 let pipelineInstance: Pipeline | null = null;
 let loadingPromise: Promise<Pipeline> | null = null;
-let loadFailed = false;
+let failCount = 0;
+let lastFailTime = 0;
+const MAX_RETRIES = 3;
+const RETRY_COOLDOWN_MS = 60_000;
 
 async function loadPipeline(): Promise<Pipeline> {
   if (pipelineInstance) return pipelineInstance;
-  if (loadFailed) throw new Error('Embeddings model failed to load previously');
+  if (failCount >= MAX_RETRIES) throw new Error('Embeddings model failed to load after max retries');
+  if (failCount > 0 && Date.now() - lastFailTime < RETRY_COOLDOWN_MS) {
+    throw new Error('Embeddings retry cooldown active');
+  }
 
   if (!loadingPromise) {
     loadingPromise = (async () => {
@@ -28,9 +34,11 @@ async function loadPipeline(): Promise<Pipeline> {
           dtype: 'fp32',
         });
         pipelineInstance = extractor as unknown as Pipeline;
+        failCount = 0;
         return pipelineInstance;
       } catch (err) {
-        loadFailed = true;
+        failCount++;
+        lastFailTime = Date.now();
         loadingPromise = null;
         throw err;
       }
@@ -104,7 +112,7 @@ export function bufferToEmbedding(buffer: Buffer): Float32Array {
  * Check if the embeddings model is available (loaded or loadable).
  */
 export async function isEmbeddingsAvailable(): Promise<boolean> {
-  if (loadFailed) return false;
+  if (failCount >= MAX_RETRIES) return false;
   if (pipelineInstance) return true;
   try {
     await loadPipeline();
@@ -112,6 +120,14 @@ export async function isEmbeddingsAvailable(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** @internal Reset embedding state — used by tests only. */
+export function resetEmbeddingState(): void {
+  failCount = 0;
+  lastFailTime = 0;
+  pipelineInstance = null;
+  loadingPromise = null;
 }
 
 export { EMBEDDING_DIM };

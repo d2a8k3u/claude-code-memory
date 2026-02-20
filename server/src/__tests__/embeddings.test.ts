@@ -1,6 +1,6 @@
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { cosineSimilarity, embeddingToBuffer, bufferToEmbedding, EMBEDDING_DIM } from '../embeddings.js';
+import { cosineSimilarity, embeddingToBuffer, bufferToEmbedding, EMBEDDING_DIM, resetEmbeddingState, isEmbeddingsAvailable, generateEmbedding } from '../embeddings.js';
 
 describe('EMBEDDING_DIM', () => {
   it('is 384', () => {
@@ -112,5 +112,24 @@ describe('embeddingToBuffer / bufferToEmbedding roundtrip', () => {
     for (let i = 0; i < 384; i++) {
       assert.ok(Math.abs(restored[i] - -0.5) < 1e-6);
     }
+  });
+});
+
+describe('Embedding retry state machine', () => {
+  beforeEach(() => {
+    resetEmbeddingState();
+  });
+
+  it('resetEmbeddingState makes embeddings available again', async () => {
+    resetEmbeddingState();
+    const available = await isEmbeddingsAvailable();
+    assert.ok(available, 'Embeddings should be available after reset');
+  });
+
+  it('generateEmbedding returns a vector after reset', async () => {
+    resetEmbeddingState();
+    const emb = await generateEmbedding('test retry');
+    assert.ok(emb, 'Should produce an embedding after reset');
+    assert.equal(emb.length, 384);
   });
 });

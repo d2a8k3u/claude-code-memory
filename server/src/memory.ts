@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import type { MemoryDatabase } from './database.js';
-import { generateEmbedding, generateEmbeddings } from './embeddings.js';
-import { rowToMemory, type Memory, type MemoryType, type RelationType } from './types.js';
+import { generateEmbedding, generateEmbeddings, cosineSimilarity } from './embeddings.js';
+import {rowToMemory, type Memory, type MemoryType, type RelationType, MemoryRow} from './types.js';
 
 const MEMORY_TYPES = ['episodic', 'semantic', 'procedural', 'working', 'pattern'] as const;
 const RELATION_TYPES = ['relates_to', 'depends_on', 'contradicts', 'extends', 'implements', 'derived_from'] as const;
@@ -20,6 +20,37 @@ function normalizeTags(tags: string[]): string[] {
       tags.map((t) => t.trim().toLowerCase().replace(/\s+/g, '-')).filter((t) => t.length > 0 && t.length <= 50),
     ),
   ];
+}
+
+interface MergeInput {
+  content: string;
+  title?: string | null;
+  tags?: string[];
+  context?: string | null;
+  source?: string | null;
+}
+
+function buildMergeUpdates(existing: MemoryRow, incoming: MergeInput): Record<string, unknown> {
+  const updates: Record<string, unknown> = {};
+  if (incoming.content.length > existing.content.length) {
+    updates.content = incoming.content;
+  }
+  if (incoming.title && !existing.title) {
+    updates.title = incoming.title;
+  }
+  const existingTags: string[] = JSON.parse(existing.tags);
+  const incomingTags = normalizeTags(incoming.tags ?? []);
+  const unionTags = [...new Set([...existingTags, ...incomingTags])];
+  if (unionTags.length > existingTags.length) {
+    updates.tags = JSON.stringify(unionTags);
+  }
+  if (incoming.context && !existing.context) {
+    updates.context = incoming.context;
+  }
+  if (incoming.source && !existing.source) {
+    updates.source = incoming.source;
+  }
+  return updates;
 }
 
 export const memoryToolDefs = [
@@ -202,36 +233,21 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
   const embeddingText = title ? `${title}\n\n${content}` : content;
   const embedding = await generateEmbedding(embeddingText);
 
-  // Auto-merge: if near-duplicate exists (distance < 0.03), merge instead of creating
-  let dupWarning = '';
   if (embedding) {
     const similar = db.findSimilarMemory(embedding, 0.05);
-    if (similar && similar.distance < 0.03) {
+    if (similar) {
       const existing = db.getMemoryById(similar.id);
       if (existing) {
-        const updates: Record<string, unknown> = {};
-        if (content.length > existing.content.length) {
-          updates.content = content;
-        }
-        if (title && !existing.title) {
-          updates.title = title;
-        }
-        if (Object.keys(updates).length > 0) {
-          db.updateMemory(similar.id, updates);
-          if (updates.content) {
-            db.updateMemoryEmbedding(similar.id, embedding);
-          }
+        const updates = buildMergeUpdates(existing, { content, title, tags, context: (args.context as string | undefined) ?? null, source });
+        updates.importance = Math.min(1.0, existing.importance + 0.05);
+        db.updateMemory(similar.id, updates);
+        if (updates.content && updates.content !== existing.content) {
+          db.updateMemoryEmbedding(similar.id, embedding);
         }
         return text(
-          `Merged with existing memory ${similar.id} (${((1 - similar.distance) * 100).toFixed(1)}% match). Updated ${Object.keys(updates).length > 0 ? Object.keys(updates).join(', ') : 'access count'}.`,
+          `Merged with existing memory ${similar.id} (${((1 - similar.distance) * 100).toFixed(1)}% match). Updated ${Object.keys(updates).filter((k) => k !== 'importance').join(', ') || 'importance'}.`,
         );
       }
-    }
-
-    // Warn about similar but distinct
-    if (similar && similar.distance >= 0.03 && similar.distance < 0.05) {
-      const similarity = ((1 - similar.distance) * 100).toFixed(1);
-      dupWarning = `\n**Warning:** Similar memory exists (${similarity}% match): ${similar.id}`;
     }
   }
 
@@ -259,7 +275,7 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
   const total = db.countMemories();
   const titleInfo = title ? `\n**Title:** ${title}` : '';
   return text(
-    `Memory stored successfully.\n\n**ID:** ${id}\n**Type:** ${memType}${titleInfo}\n**Tags:** ${tags.join(', ') || '(none)'}\n**Embedding:** ${embeddingStatus}\n**Total memories:** ${total}${dupWarning}`,
+    `Memory stored successfully.\n\n**ID:** ${id}\n**Type:** ${memType}${titleInfo}\n**Tags:** ${tags.join(', ') || '(none)'}\n**Embedding:** ${embeddingStatus}\n**Total memories:** ${total}`,
   );
 }
 
@@ -391,14 +407,57 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
   });
   const embeddings = await generateEmbeddings(texts);
 
-  const ids: string[] = [];
+  const resolvedIds: string[] = [];
+  const acceptedEmbeddings: { id: string; embedding: Float32Array }[] = [];
+  let insertedCount = 0;
+  let mergedCount = 0;
   let embeddingCount = 0;
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const id = ulid();
-    ids.push(id);
+    const emb = embeddings[i];
     const tags = normalizeTags(item.tags ?? []);
+
+    // Dedup pass 1: within-batch
+    if (emb) {
+      const withinBatchDup = acceptedEmbeddings.find(
+        (a) => 1 - cosineSimilarity(a.embedding, emb) < 0.05,
+      );
+      if (withinBatchDup) {
+        const existing = db.getMemoryById(withinBatchDup.id);
+        if (existing) {
+          const updates = buildMergeUpdates(existing, { content: item.content, title: item.title, tags, context: item.context, source: item.source });
+          updates.importance = Math.min(1.0, existing.importance + 0.05);
+          db.updateMemory(withinBatchDup.id, updates);
+          if (updates.content && updates.content !== existing.content) {
+            db.updateMemoryEmbedding(withinBatchDup.id, emb);
+          }
+        }
+        resolvedIds.push(withinBatchDup.id);
+        mergedCount++;
+        continue;
+      }
+
+      // Dedup pass 2: against DB
+      const dbDup = db.findSimilarMemory(emb, 0.05);
+      if (dbDup) {
+        const existing = db.getMemoryById(dbDup.id);
+        if (existing) {
+          const updates = buildMergeUpdates(existing, { content: item.content, title: item.title, tags, context: item.context, source: item.source });
+          updates.importance = Math.min(1.0, existing.importance + 0.05);
+          db.updateMemory(dbDup.id, updates);
+          if (updates.content && updates.content !== existing.content) {
+            db.updateMemoryEmbedding(dbDup.id, emb);
+          }
+          resolvedIds.push(dbDup.id);
+          mergedCount++;
+          continue;
+        }
+      }
+    }
+
+    // No duplicate — insert
+    const id = ulid();
     const defaultImportance = item.type === 'pattern' ? 0.8 : 0.5;
 
     db.insertMemory({
@@ -416,16 +475,19 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
       last_accessed: null,
     });
 
-    const emb = embeddings[i];
     if (emb) {
       db.updateMemoryEmbedding(id, emb);
+      acceptedEmbeddings.push({ id, embedding: emb });
       embeddingCount++;
     }
+
+    resolvedIds.push(id);
+    insertedCount++;
   }
 
   const total = db.countMemories();
   return text(
-    `Batch stored ${items.length} memories (${embeddingCount} with embeddings).\n\n**IDs:** ${ids.join(', ')}\n**Total memories:** ${total}`,
+    `Batch stored ${insertedCount} new, ${mergedCount} merged (${embeddingCount} with embeddings).\n\n**IDs:** ${resolvedIds.join(', ')}\n**Total memories:** ${total}`,
   );
 }
 
