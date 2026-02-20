@@ -43,6 +43,21 @@ npm run build 2>&1 | tail -1
 echo "Registering MCP server..."
 claude mcp add --scope user claude-memory node "$SERVER_ENTRY" 2>/dev/null || true
 
+# Install skills globally
+echo "Installing skills..."
+SKILLS_SRC="$SCRIPT_DIR/skills"
+SKILLS_DST="$HOME/.claude/skills"
+if [ -d "$SKILLS_SRC" ]; then
+  for skill_dir in "$SKILLS_SRC"/*/; do
+    skill_name="$(basename "$skill_dir")"
+    target="$SKILLS_DST/$skill_name"
+    rm -rf "$target"
+    mkdir -p "$SKILLS_DST"
+    ln -s "$skill_dir" "$target"
+    echo "  Linked skill: $skill_name"
+  done
+fi
+
 # Add hooks and permissions to global settings
 echo "Configuring hooks and permissions..."
 node -e "
@@ -145,5 +160,5 @@ echo ""
 echo "The plugin is now globally active in Claude Code."
 echo "Restart Claude Code to apply changes."
 echo ""
-echo "First run tip: use /claude-memory:memory-init to bootstrap"
+echo "First run tip: use /memory-init to bootstrap"
 echo "the knowledge base from your project files."

@@ -30,7 +30,7 @@ claude --plugin-dir /path/to/claude-memory
 On first use, bootstrap the memory from project files:
 
 ```
-/claude-memory:memory-init
+/memory-init
 ```
 
 ## How It Works
