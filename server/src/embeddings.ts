@@ -130,4 +130,8 @@ export function resetEmbeddingState(): void {
   loadingPromise = null;
 }
 
+export function warmEmbeddingModel(): void {
+  loadPipeline().catch(() => {});
+}
+
 export { EMBEDDING_DIM };
