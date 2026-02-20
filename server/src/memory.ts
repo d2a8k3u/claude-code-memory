@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
+import { statSync } from 'node:fs';
 import type { MemoryDatabase } from './database.js';
-import { generateEmbedding, generateEmbeddings, cosineSimilarity } from './embeddings.js';
+import { generateEmbedding, generateEmbeddings, cosineSimilarity, isEmbeddingsAvailable } from './embeddings.js';
 import {rowToMemory, type Memory, type MemoryType, type RelationType, MemoryRow} from './types.js';
 
 const MEMORY_TYPES = ['episodic', 'semantic', 'procedural', 'working', 'pattern'] as const;
@@ -163,6 +164,12 @@ export const memoryToolDefs = [
       depth: z.number().min(1).max(3).optional().describe('Levels of relations to traverse (default 1, max 3)'),
     },
   },
+  {
+    name: 'memory_health',
+    description:
+      'Health check for debugging the memory system. Returns memory counts, embedding coverage, staleness, age distribution, and session info.',
+    schema: {},
+  },
 ] as const;
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }> };
@@ -191,6 +198,8 @@ export async function handleMemoryTool(
       return memoryRelate(db, args);
     case 'memory_graph':
       return memoryGraph(db, args);
+    case 'memory_health':
+      return memoryHealth(db);
     default:
       return text(`Unknown memory tool: ${toolName}`);
   }
@@ -205,7 +214,7 @@ async function backfillMissingEmbeddings(db: MemoryDatabase): Promise<void> {
   const BATCH_SIZE = 10;
   for (let i = 0; i < ids.length; i += BATCH_SIZE) {
     const batch = ids.slice(i, i + BATCH_SIZE);
-    const rows = batch.map((id) => db.getMemoryById(id)).filter((r): r is NonNullable<typeof r> => r !== null);
+    const rows = batch.map((id) => db.getMemoryByIdRaw(id)).filter((r): r is NonNullable<typeof r> => r !== null);
     const texts = rows.map((r) => {
       const title = r.title ? `${r.title}\n\n` : '';
       return `${title}${r.content}`;
@@ -236,7 +245,7 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
   if (embedding) {
     const similar = db.findSimilarMemory(embedding, 0.05);
     if (similar) {
-      const existing = db.getMemoryById(similar.id);
+      const existing = db.getMemoryByIdRaw(similar.id);
       if (existing) {
         const updates = buildMergeUpdates(existing, { content, title, tags, context: (args.context as string | undefined) ?? null, source });
         updates.importance = Math.min(1.0, existing.importance + 0.05);
@@ -272,10 +281,41 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
     embeddingStatus = 'generated';
   }
 
+  let relatedNote = '';
+  if (embedding) {
+    const related = db.findRelatedMemories(embedding, 5);
+    if (related.length > 0) {
+      const contradictionLines: string[] = [];
+      const otherLines: string[] = [];
+
+      for (const c of related) {
+        const mem = db.getMemoryByIdRaw(c.id);
+        if (!mem) continue;
+        const label = mem.title ?? mem.content.slice(0, 80);
+        const similarity = ((1 - c.distance) * 100).toFixed(1);
+
+        if (mem.type === memType) {
+          const weight = parseFloat((1 - c.distance).toFixed(3));
+          db.addRelation(id, mem.id, 'contradicts', weight);
+          contradictionLines.push(`- → contradicts ${c.id} (${similarity}% similar): "${label}" [weight: ${weight}]`);
+        } else {
+          otherLines.push(`- ${c.id} (${similarity}% similar): ${label}`);
+        }
+      }
+
+      if (contradictionLines.length > 0) {
+        relatedNote += `\n\n**Potential contradictions auto-linked:**\n${contradictionLines.join('\n')}`;
+      }
+      if (otherLines.length > 0) {
+        relatedNote += `\n\n**Other related memories (review manually):**\n${otherLines.join('\n')}`;
+      }
+    }
+  }
+
   const total = db.countMemories();
   const titleInfo = title ? `\n**Title:** ${title}` : '';
   return text(
-    `Memory stored successfully.\n\n**ID:** ${id}\n**Type:** ${memType}${titleInfo}\n**Tags:** ${tags.join(', ') || '(none)'}\n**Embedding:** ${embeddingStatus}\n**Total memories:** ${total}`,
+    `Memory stored successfully.\n\n**ID:** ${id}\n**Type:** ${memType}${titleInfo}\n**Tags:** ${tags.join(', ') || '(none)'}\n**Embedding:** ${embeddingStatus}\n**Total memories:** ${total}${relatedNote}`,
   );
 }
 
@@ -341,7 +381,7 @@ function memoryGet(db: MemoryDatabase, args: Record<string, unknown>): ToolResul
     for (const rel of relations) {
       const otherId = rel.source_id === id ? rel.target_id : rel.source_id;
       const direction = rel.source_id === id ? '->' : '<-';
-      const otherRow = db.getMemoryById(otherId);
+      const otherRow = db.getMemoryByIdRaw(otherId);
       const otherLabel = otherRow?.title ?? otherRow?.content.slice(0, 50) ?? otherId;
       result += `- ${direction} ${rel.relation_type} (${rel.weight}): ${otherLabel} [${otherId}]\n`;
     }
@@ -424,7 +464,7 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
         (a) => 1 - cosineSimilarity(a.embedding, emb) < 0.05,
       );
       if (withinBatchDup) {
-        const existing = db.getMemoryById(withinBatchDup.id);
+        const existing = db.getMemoryByIdRaw(withinBatchDup.id);
         if (existing) {
           const updates = buildMergeUpdates(existing, { content: item.content, title: item.title, tags, context: item.context, source: item.source });
           updates.importance = Math.min(1.0, existing.importance + 0.05);
@@ -441,7 +481,7 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
       // Dedup pass 2: against DB
       const dbDup = db.findSimilarMemory(emb, 0.05);
       if (dbDup) {
-        const existing = db.getMemoryById(dbDup.id);
+        const existing = db.getMemoryByIdRaw(dbDup.id);
         if (existing) {
           const updates = buildMergeUpdates(existing, { content: item.content, title: item.title, tags, context: item.context, source: item.source });
           updates.importance = Math.min(1.0, existing.importance + 0.05);
@@ -497,8 +537,8 @@ function memoryRelate(db: MemoryDatabase, args: Record<string, unknown>): ToolRe
   const relationType = args.relation_type as RelationType;
   const weight = (args.weight as number) ?? 0.5;
 
-  const source = db.getMemoryById(sourceId);
-  const target = db.getMemoryById(targetId);
+  const source = db.getMemoryByIdRaw(sourceId);
+  const target = db.getMemoryByIdRaw(targetId);
 
   if (!source) return text(`Source memory ${sourceId} not found.`);
   if (!target) return text(`Target memory ${targetId} not found.`);
@@ -514,7 +554,7 @@ function memoryGraph(db: MemoryDatabase, args: Record<string, unknown>): ToolRes
   const id = args.id as string;
   const depth = (args.depth as number) ?? 1;
 
-  const center = db.getMemoryById(id);
+  const center = db.getMemoryByIdRaw(id);
   if (!center) return text(`Memory ${id} not found.`);
 
   const graph = db.getGraph(id, depth);
@@ -543,6 +583,54 @@ function memoryGraph(db: MemoryDatabase, args: Record<string, unknown>): ToolRes
   }
 
   return text(result);
+}
+
+async function memoryHealth(db: MemoryDatabase): Promise<ToolResult> {
+  const stats = db.getHealthStats();
+  const embAvailable = await isEmbeddingsAvailable();
+
+  let fileSize = 'unknown';
+  try {
+    const st = statSync(db.path);
+    const mb = (st.size / (1024 * 1024)).toFixed(2);
+    fileSize = `${mb} MB`;
+  } catch {
+    // DB path may not be accessible
+  }
+
+  const typeLines = Object.entries(stats.byType)
+    .map(([type, count]) => `  - ${type}: ${count}`)
+    .join('\n');
+
+  const report = `# Memory Health Report
+
+**Database:** ${fileSize}
+**Embeddings model:** ${embAvailable ? 'available' : 'unavailable'}
+
+## Counts
+- **Total:** ${stats.total}
+${typeLines}
+
+## Embedding Coverage
+- **With embedding:** ${stats.withEmbedding}
+- **Without embedding:** ${stats.withoutEmbedding}
+- **Coverage:** ${stats.total > 0 ? ((stats.withEmbedding / stats.total) * 100).toFixed(1) : '0'}%
+
+## Staleness
+- **Stale memories** (importance < 0.2, access < 2, older than 30d): ${stats.staleCount}
+
+## Age Distribution
+- Last 24h: ${stats.ageDistribution.last24h}
+- Last 7d: ${stats.ageDistribution.last7d}
+- Last 30d: ${stats.ageDistribution.last30d}
+- Older: ${stats.ageDistribution.older}
+
+## Session Info
+- **Session count:** ${stats.sessionCount}
+- **Last consolidation:** session #${stats.lastConsolidation}
+- **Sessions since consolidation:** ${stats.sessionCount - stats.lastConsolidation}`;
+
+  return text(report);
 }
 
 function formatMemory(m: Memory): string {
