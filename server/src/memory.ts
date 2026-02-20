@@ -9,6 +9,11 @@ const RELATION_TYPES = ['relates_to', 'depends_on', 'contradicts', 'extends', 'i
 
 let backfillDone = false;
 
+/** @internal Reset backfill state — used by tests only. */
+export function resetBackfillFlag(): void {
+  backfillDone = false;
+}
+
 function normalizeTags(tags: string[]): string[] {
   return [
     ...new Set(
