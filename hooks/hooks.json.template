@@ -1,0 +1,41 @@
+{
+  "description": "Claude Memory - automatic context loading, error recall, and memory persistence",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node {{PLUGIN_DIR}}/hooks/scripts/session-start.js",
+            "statusMessage": "Loading project memory...",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": { "tool_name": "Bash" },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node {{PLUGIN_DIR}}/hooks/scripts/post-tool-use.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node {{PLUGIN_DIR}}/hooks/scripts/session-end.js",
+            "statusMessage": "Saving session memory...",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
