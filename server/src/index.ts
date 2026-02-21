@@ -17,7 +17,7 @@ async function main() {
 
   const server = new McpServer({
     name: 'claude-memory',
-    version: '0.1.0',
+    version: '0.1.1',
   });
 
   for (const tool of memoryToolDefs) {
