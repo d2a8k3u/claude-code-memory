@@ -52,7 +52,7 @@ if ! claude mcp add -s user claude-memory -- node "$SERVER_ENTRY"; then
     if (!config.mcpServers) config.mcpServers = {};
     config.mcpServers['claude-memory'] = {
       command: 'node',
-      args: ['$SERVER_ENTRY']
+      args: [\"$SERVER_ENTRY\"]
     };
     fs.mkdirSync(require('path').dirname(mcpPath), { recursive: true });
     fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2) + '\n');
@@ -86,8 +86,8 @@ fi
 echo "Configuring hooks and permissions..."
 node -e "
 const fs = require('fs');
-const path = '$SETTINGS_FILE';
-const pluginDir = '$SCRIPT_DIR';
+const path = \"$SETTINGS_FILE\";
+const pluginDir = \"$SCRIPT_DIR\";
 
 let settings = {};
 try {
