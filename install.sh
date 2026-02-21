@@ -39,9 +39,33 @@ npm install --prefer-offline 2>&1 | tail -1
 echo "Building MCP server..."
 npm run build 2>&1 | tail -1
 
-# Register MCP server globally
+# Register MCP server globally (merge into user-scoped config)
 echo "Registering MCP server..."
-claude mcp add --scope user claude-memory node "$SERVER_ENTRY" 2>/dev/null || true
+claude mcp remove -s user claude-memory 2>/dev/null || true
+if ! claude mcp add -s user claude-memory -- node "$SERVER_ENTRY"; then
+  echo "Warning: 'claude mcp add' failed, writing ~/.claude/.mcp.json directly..."
+  node -e "
+    const fs = require('fs');
+    const mcpPath = require('path').join(require('os').homedir(), '.claude', '.mcp.json');
+    let config = {};
+    try { config = JSON.parse(fs.readFileSync(mcpPath, 'utf8')); } catch {}
+    if (!config.mcpServers) config.mcpServers = {};
+    config.mcpServers['claude-memory'] = {
+      command: 'node',
+      args: ['$SERVER_ENTRY']
+    };
+    fs.mkdirSync(require('path').dirname(mcpPath), { recursive: true });
+    fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2) + '\n');
+  "
+fi
+
+# Verify registration
+if claude mcp list 2>/dev/null | grep -q "claude-memory"; then
+  echo "  MCP server registered (user scope)"
+else
+  echo "  Warning: Could not verify MCP registration. You may need to run:"
+  echo "    claude mcp add -s user claude-memory -- node $SERVER_ENTRY"
+fi
 
 # Install skills globally
 echo "Installing skills..."
