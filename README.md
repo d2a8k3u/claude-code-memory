@@ -1,17 +1,16 @@
 # Claude Code Memory
 
-A Claude Code plugin that gives Claude fully automatic, per-project cognitive memory.
+A [Claude Code](https://claude.ai/download) plugin that gives Claude fully automatic, per-project cognitive memory — powered by local embeddings and hybrid search.
 
-## What It Does
+## Features
 
-- **Remembers** previous sessions (episodic), project facts (semantic), procedures (procedural), and consolidated insights (pattern)
 - **Auto-loads** relevant context at session start using git signals (branch, commits, modified files)
-- **Auto-saves** a structured session summary at session end
-- **Auto-recalls** relevant memories when Bash errors occur
-- **Auto-consolidates** every 10 sessions — Claude reviews and cleans up duplicates, stale entries, and emerging patterns
+- **Auto-saves** a structured session summary when the session ends
+- **Auto-recalls** matching memories when Bash errors occur
 - **Auto-merges** near-duplicate memories on store (≥95% cosine similarity)
+- **Auto-consolidates** every 10 sessions — reviews duplicates, stale entries, and emerging patterns
 
-Everything is scoped to the current project via the working directory.
+All data stays local. Everything is scoped to the current project via the working directory.
 
 ## Requirements
 
@@ -26,35 +25,22 @@ cd claude-memory
 ./install.sh
 ```
 
-The installer:
-1. Builds the MCP server (`server/dist/`)
-2. Registers it globally via `claude mcp add --scope user`
-3. Adds three hooks to `~/.claude/settings.json` (SessionStart, PostToolUse, Stop)
-4. Grants MCP tool permissions in `~/.claude/settings.json`
-5. Symlinks skills into `~/.claude/skills/`
+The installer builds the MCP server, registers it globally, adds hooks to `~/.claude/settings.json`, and symlinks skills. **Restart Claude Code after installation.**
 
-**Restart Claude Code after installation.** The plugin is then globally active in every project.
-
-> **Note:** On first use, the plugin downloads a ~90 MB embedding model ([all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)) from Hugging Face. This happens once and is cached locally. The first session start may take 10-30 seconds depending on your connection. Subsequent sessions load instantly.
+> **Note:** On first use, the plugin downloads a ~90 MB embedding model ([all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)) from Hugging Face. This happens once and is cached locally. The first session start may take 10-30 seconds depending on your connection.
 
 ### First-run bootstrap (optional)
 
-On a new project, run the skill to populate the memory from existing project files:
-
-```
-/memory-init
-```
-
-This reads your README, package.json, CLAUDE.md, git history, and other key files to give Claude an informed starting point.
+Run `/memory-init` in any project to populate the memory from existing project files (README, package.json, CLAUDE.md, git history, etc.).
 
 ## How It Works
 
 ### Session Lifecycle
 
-1. **SessionStart hook** — clears working memories, decays stale importance, searches git signals (branch, commits, modified files) against the memory DB, injects relevant context and behavioral instructions into the system prompt
-2. **During session** — Claude uses 9 MCP tools automatically based on injected instructions (store, search, get, update, delete, list, batch-store, relate, graph)
-3. **PostToolUse hook** — after each Bash tool call, if an error occurred, extracts error terms and injects matching memories as additional context
-4. **Stop hook** — analyzes the session transcript and saves a structured episodic summary (task, tools used, files touched, errors encountered)
+1. **SessionStart** — clears working memories, decays stale importance, injects relevant context from the memory DB
+2. **During session** — Claude uses 9 MCP tools automatically (store, search, get, update, delete, list, batch-store, relate, graph)
+3. **PostToolUse** — on Bash errors, extracts error terms and surfaces matching memories
+4. **Stop** — analyzes the session transcript and saves a structured episodic summary
 
 ### Memory Types
 
@@ -66,65 +52,44 @@ This reads your README, package.json, CLAUDE.md, git history, and other key file
 | `working` | Session scratchpad | Hypotheses, intermediate results (auto-cleared next session) |
 | `pattern` | Consolidated insights | "Error handling: always use Result types with typed errors" |
 
-### Relations
-
-Memories can be linked: `relates_to`, `depends_on`, `contradicts`, `extends`, `implements`, `derived_from`.
-
-Patterns are typically linked to their source memories via `derived_from`.
-
-## Architecture
-
-```
-claude-memory/
-├── install.sh                    # Installs deps, builds, registers MCP + hooks + skills
-├── server/
-│   ├── src/
-│   │   ├── index.ts              # MCP server entry point
-│   │   ├── cli.ts                # Hook runner entry point
-│   │   ├── database.ts           # SQLite + FTS5 + vec0
-│   │   ├── memory.ts             # 9 MCP tools
-│   │   ├── embeddings.ts         # Local embeddings (all-MiniLM-L6-v2, 384-dim)
-│   │   ├── types.ts              # TypeScript types
-│   │   ├── cli/
-│   │   │   ├── session-start.ts  # Git-aware context injection + cleanup
-│   │   │   ├── session-end.ts    # Structured session summary
-│   │   │   ├── error-context.ts  # Bash error recall
-│   │   │   ├── git-signals.ts    # Branch/commit/file signal extraction
-│   │   │   ├── transcript.ts     # Session transcript parser
-│   │   │   └── types.ts          # Hook I/O types
-│   │   └── __tests__/            # Test suite
-│   ├── package.json
-│   └── tsconfig.json
-├── skills/
-│   └── memory-init/SKILL.md      # /memory-init skill — bootstrap from project files
-├── agents/
-│   └── memory-curator.md         # Memory maintenance sub-agent (Haiku)
-└── hooks/
-    └── hooks.json.template       # Reference hook config template
-```
+Memories can be linked with relations: `relates_to`, `depends_on`, `contradicts`, `extends`, `implements`, `derived_from`.
 
 ### Search
 
-Hybrid: FTS5 full-text + semantic vectors (cosine similarity via vec0). Ranked by `text_score * 0.5 + importance * 0.2 + recency * 0.2 + access_freq * 0.1`. Falls back to FTS-only when embeddings are unavailable.
+Hybrid search combining FTS5 full-text and semantic vectors (cosine similarity via sqlite-vec). Falls back to text-only when embeddings are unavailable.
 
-### Data Model
+### Storage
+
+SQLite database at `.claude/memory-db/memory.sqlite` inside each project. Includes FTS5 and vec0 virtual tables for fast search.
+
+<details>
+<summary>Architecture</summary>
 
 ```
-memories:  id, type, title, content, context, source, tags,
-           importance, created_at, updated_at, access_count,
-           last_accessed, embedding
-relations: source_id, target_id, relation_type, weight
-meta:      key, value
+claude-memory/
+├── install.sh                    # Installer
+├── server/src/
+│   ├── index.ts                  # MCP server entry point
+│   ├── cli.ts                    # Hook runner entry point
+│   ├── database.ts               # SQLite + FTS5 + vec0
+│   ├── memory.ts                 # 9 MCP tool handlers
+│   ├── embeddings.ts             # Local embeddings (all-MiniLM-L6-v2, 384-dim)
+│   └── cli/                      # Hook handlers (session-start, session-end, error-context)
+├── skills/memory-init/           # /memory-init bootstrap skill
+├── agents/memory-curator.md      # Maintenance sub-agent
+└── hooks/hooks.json.template     # Reference hook config
 ```
 
-Plus `memories_fts` (FTS5) and `memories_vec` (vec0) virtual tables.
-
-The database lives at `.claude/memory-db/memory.sqlite` inside each project.
+</details>
 
 ## Tech Stack
 
-TypeScript · MCP SDK · better-sqlite3 · sqlite-vec · @huggingface/transformers · Zod · ULID · tsup · Node.js ≥ 18
+TypeScript · MCP SDK · better-sqlite3 · sqlite-vec · @huggingface/transformers · Zod · tsup
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT
+[MIT](LICENSE)
