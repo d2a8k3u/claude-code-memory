@@ -72,7 +72,7 @@ export function handleErrorContext(db: MemoryDatabase, input: HookInput): HookOu
   const memories = results
     .map((m) => {
       const titlePart = m.title ? `**${m.title}:** ` : '';
-      return `- [${m.type}] ${titlePart}${m.content.slice(0, 200)}`;
+      return `- [${m.type}] ${titlePart}${m.content}`;
     })
     .join('\n');
 

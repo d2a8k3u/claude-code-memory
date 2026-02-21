@@ -92,7 +92,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
       for (const { memory: mem } of ranked) {
         seenIds.add(mem.id);
         const titlePart = mem.title ? `**${mem.title}:** ` : '';
-        sections.push(`- [${mem.type}] ${titlePart}${mem.content.slice(0, 200)}`);
+        sections.push(`- [${mem.type}] ${titlePart}${mem.content}`);
       }
     }
   }
@@ -102,7 +102,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   appendSection(sections, seenIds, recentEpisodic, '\n## Recent Sessions', (mem) => {
     const date = mem.created_at.slice(0, 10);
     const ctx = mem.context ? ` (${mem.context})` : '';
-    return `- [${date}]${ctx} ${mem.content.slice(0, 200)}`;
+    return `- [${date}]${ctx} ${mem.content}`;
   });
 
   // Context-aware Key Knowledge (semantic)
@@ -112,13 +112,13 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
       .slice(0, 5);
     appendSection(sections, seenIds, semanticResults, '\n## Key Knowledge', (mem) => {
       const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content.slice(0, 200)}`;
+      return `- ${titlePart}${mem.content}`;
     });
   } else {
     const semanticMems = db.getTopByImportance('semantic', 0.5, 5);
     appendSection(sections, seenIds, semanticMems, '\n## Key Knowledge', (mem) => {
       const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content.slice(0, 200)}`;
+      return `- ${titlePart}${mem.content}`;
     });
   }
 
@@ -126,7 +126,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   const patterns = db.getTopByImportance('pattern', 0, 5);
   appendSection(sections, seenIds, patterns, '\n## Patterns & Conventions', (mem) => {
     const title = mem.title ?? 'Untitled pattern';
-    return `- **${title}:** ${mem.content.slice(0, 200)}`;
+    return `- **${title}:** ${mem.content}`;
   });
 
   // Context-aware Procedures
@@ -136,13 +136,13 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
       .slice(0, 3);
     appendSection(sections, seenIds, procedureResults, '\n## Procedures', (mem) => {
       const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content.slice(0, 200)}`;
+      return `- ${titlePart}${mem.content}`;
     });
   } else {
     const procedures = db.getTopByImportance('procedural', 0.5, 3);
     appendSection(sections, seenIds, procedures, '\n## Procedures', (mem) => {
       const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content.slice(0, 200)}`;
+      return `- ${titlePart}${mem.content}`;
     });
   }
 
