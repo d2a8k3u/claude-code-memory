@@ -58,7 +58,8 @@ export async function generateEmbedding(text: string): Promise<Float32Array | nu
     const output = await pipe([text], { pooling: 'mean', normalize: true });
     const vectors = output.tolist();
     return new Float32Array(vectors[0]);
-  } catch {
+  } catch (err) {
+    console.warn(`[claude-memory] Embedding generation failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }
@@ -75,7 +76,8 @@ export async function generateEmbeddings(texts: string[]): Promise<(Float32Array
     const output = await pipe(texts, { pooling: 'mean', normalize: true });
     const vectors = output.tolist();
     return vectors.map((v: number[]) => new Float32Array(v));
-  } catch {
+  } catch (err) {
+    console.warn(`[claude-memory] Batch embedding failed (${texts.length} texts): ${err instanceof Error ? err.message : String(err)}`);
     return texts.map(() => null);
   }
 }
@@ -131,7 +133,9 @@ export function resetEmbeddingState(): void {
 }
 
 export function warmEmbeddingModel(): void {
-  loadPipeline().catch(() => {});
+  loadPipeline().catch((err) => {
+    console.warn(`[claude-memory] Embedding model warmup failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 }
 
 export { EMBEDDING_DIM };
