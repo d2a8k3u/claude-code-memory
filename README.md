@@ -21,7 +21,7 @@ Everything is scoped to the current project via the working directory.
 ## Installation
 
 ```bash
-git clone <repo-url> claude-memory
+git clone https://github.com/d2a8k3u/claude-code-memory.git claude-memory
 cd claude-memory
 ./install.sh
 ```
@@ -34,6 +34,8 @@ The installer:
 5. Symlinks skills into `~/.claude/skills/`
 
 **Restart Claude Code after installation.** The plugin is then globally active in every project.
+
+> **Note:** On first use, the plugin downloads a ~90 MB embedding model ([all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)) from Hugging Face. This happens once and is cached locally. The first session start may take 10-30 seconds depending on your connection. Subsequent sessions load instantly.
 
 ### First-run bootstrap (optional)
 
