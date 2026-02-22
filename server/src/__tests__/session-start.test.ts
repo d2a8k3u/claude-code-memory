@@ -144,18 +144,6 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     cleanup(db, dir);
   });
 
-  it('includes behavioral instructions', async () => {
-    const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
-
-    assert.ok(ctx.includes('## Memory System'));
-    assert.ok(ctx.includes('Auto-Recall'));
-    assert.ok(ctx.includes('Auto-Save'));
-    assert.ok(ctx.includes('memory_search'));
-    assert.ok(ctx.includes('memory_store'));
-    cleanup(db, dir);
-  });
-
   it('triggers consolidation after 10 sessions with stats', async () => {
     db.setSessionMeta('session_count', '9');
     db.setSessionMeta('last_consolidation', '0');

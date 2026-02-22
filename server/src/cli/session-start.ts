@@ -14,10 +14,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   warmEmbeddingModel();
 
-  // Phase 1: Structured git signals
   const signals = extractGitSignals(cwd);
-
-  // Phase 2: Cleanup
   const workingCleaned = db.deleteAllWorkingMemories();
   const episodicCleaned = db.cleanupOldEpisodicMemories(90);
   const decayed = db.decayImportance(30, 0.05);
@@ -25,14 +22,12 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   const sessionCount = parseInt(db.getSessionMeta('session_count') ?? '0', 10) + 1;
   db.setSessionMeta('session_count', String(sessionCount));
 
-  // Phase 3: Build per-channel queries from structured signals
   const channels: SearchChannel[] = [];
   if (signals.cwd.length > 0) channels.push({ query: signals.cwd.join(' '), weight: 1.0 });
   if (signals.branch.length > 0) channels.push({ query: signals.branch.join(' '), weight: 1.0 });
   if (signals.commits.length > 0) channels.push({ query: signals.commits.slice(0, 8).join(' '), weight: 0.8 });
   if (signals.files.length > 0) channels.push({ query: signals.files.slice(0, 8).join(' '), weight: 0.8 });
 
-  // Build overview query from top term of each signal source
   const overviewTerms: string[] = [];
   if (signals.cwd.length > 0) overviewTerms.push(signals.cwd[0]);
   if (signals.branch.length > 0) overviewTerms.push(signals.branch[0]);
@@ -40,7 +35,6 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   if (signals.files.length > 0) overviewTerms.push(signals.files[0]);
   const overviewQuery = overviewTerms.length > 0 ? [...new Set(overviewTerms)].join(' ') : '';
 
-  // Batch-generate embeddings for all queries
   const allQueries = channels.map((c) => c.query);
   if (overviewQuery && !allQueries.includes(overviewQuery)) {
     allQueries.push(overviewQuery);
@@ -62,7 +56,6 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
         : embeddings[embeddings.length - 1])
     : null;
 
-  // Phase 4: Multi-query hybrid search + merge
   const sections: string[] = [];
   const seenIds = new Set<string>();
 
@@ -97,7 +90,6 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     }
   }
 
-  // Recent episodic (unchanged — recency is the point)
   const recentEpisodic = db.getRecentByType('episodic', 3);
   appendSection(sections, seenIds, recentEpisodic, '\n## Recent Sessions', (mem) => {
     const date = mem.created_at.slice(0, 10);
@@ -105,7 +97,6 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     return `- [${date}]${ctx} ${mem.content}`;
   });
 
-  // Context-aware Key Knowledge (semantic)
   if (overviewQuery && overviewEmbedding) {
     const semanticResults = db.hybridSearchMemories(overviewQuery, overviewEmbedding, 20)
       .filter((r) => r.type === 'semantic')
@@ -122,14 +113,12 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     });
   }
 
-  // Patterns (unchanged — inherently general/high-value)
   const patterns = db.getTopByImportance('pattern', 0, 5);
   appendSection(sections, seenIds, patterns, '\n## Patterns & Conventions', (mem) => {
     const title = mem.title ?? 'Untitled pattern';
     return `- **${title}:** ${mem.content}`;
   });
 
-  // Context-aware Procedures
   if (overviewQuery && overviewEmbedding) {
     const procedureResults = db.hybridSearchMemories(overviewQuery, overviewEmbedding, 15)
       .filter((r) => r.type === 'procedural')
@@ -146,14 +135,12 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     });
   }
 
-  // Phase 5: Consolidation trigger
   const lastConsolidation = parseInt(db.getSessionMeta('last_consolidation') ?? '0', 10);
   const consolidationNeeded = sessionCount - lastConsolidation >= 10;
   if (consolidationNeeded) {
     db.setSessionMeta('last_consolidation', String(sessionCount));
   }
 
-  // Phase 6: Format output
   const cleanupParts: string[] = [];
   if (workingCleaned) cleanupParts.push(`${workingCleaned} working cleared`);
   if (episodicCleaned) cleanupParts.push(`${episodicCleaned} old episodic archived`);
@@ -161,30 +148,6 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   const cleanupNote = cleanupParts.length > 0 ? ` (${cleanupParts.join(', ')})` : '';
 
   const header = `# Project Memory Context (${seenIds.size} items loaded, session #${sessionCount})${cleanupNote}\n`;
-
-  const behavioralInstructions = `
-## Memory System
-
-You have project memory via MCP tools. Use it automatically without asking.
-
-### Auto-Recall
-- On errors: \`memory_search\` with error keywords
-- Starting a module: \`memory_search\` with module/component name
-- Before decisions: \`memory_search\` for prior decisions (filter type "pattern" or tag "decision")
-
-### Auto-Save
-After resolving non-trivial problems, silently store what you learned:
-- Bug fix → \`memory_store\` type "episodic" (what broke + fix)
-- Project fact → \`memory_store\` type "semantic" (with title)
-- Procedure → \`memory_store\` type "procedural"
-- Pattern noticed → \`memory_store\` type "pattern" (with title, importance 0.8)
-
-### Rules
-- Search before storing (avoid duplicates)
-- Be concise (1-3 sentences per memory)
-- Lowercase hyphenated tags
-- Don't store trivial actions
-- Don't ask user before saving`;
 
   let consolidationPrompt = '';
   if (consolidationNeeded) {
@@ -216,7 +179,7 @@ Before starting the user's task, spend a moment on memory maintenance:
 5. Briefly report what you cleaned up, then proceed with the task`;
   }
 
-  const context = header + sections.join('\n') + behavioralInstructions + consolidationPrompt;
+  const context = header + sections.join('\n') + consolidationPrompt;
 
   return {
     hookSpecificOutput: {

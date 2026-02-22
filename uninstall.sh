@@ -84,6 +84,23 @@ if [ -f "$SETTINGS_FILE" ]; then
   "
 fi
 
+# Remove memory section from CLAUDE.md
+echo "Cleaning up CLAUDE.md..."
+CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+MARKER_START="<!-- claude-memory:start -->"
+MARKER_END="<!-- claude-memory:end -->"
+
+if [ -f "$CLAUDE_MD" ] && grep -q "$MARKER_START" "$CLAUDE_MD"; then
+  TMPFILE="$(mktemp)"
+  awk -v start="$MARKER_START" -v end="$MARKER_END" '
+    $0 == start { skip=1; next }
+    $0 == end { skip=0; next }
+    !skip { print }
+  ' "$CLAUDE_MD" > "$TMPFILE"
+  mv "$TMPFILE" "$CLAUDE_MD"
+  echo "  Removed memory section from CLAUDE.md"
+fi
+
 echo ""
 echo "Uninstall complete!"
 echo ""

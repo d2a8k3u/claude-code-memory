@@ -178,6 +178,59 @@ fs.mkdirSync(require('path').dirname(path), { recursive: true });
 fs.writeFileSync(path, JSON.stringify(settings, null, 2) + '\n');
 "
 
+# Add memory instructions to CLAUDE.md
+echo "Configuring CLAUDE.md..."
+CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+MARKER_START="<!-- claude-memory:start -->"
+MARKER_END="<!-- claude-memory:end -->"
+
+MEMORY_SECTION="$MARKER_START
+## Memory System
+
+You have project memory via MCP tools (\`memory_store\`, \`memory_search\`, etc.). Use them proactively and automatically — never ask the user before saving or searching.
+
+### When to search (\`memory_search\`)
+- At the start of any non-trivial task: search for prior work on the same module/feature
+- Before making architectural decisions: search for prior decisions (type \"pattern\")
+- When encountering errors: search with error message keywords
+- When touching unfamiliar code: search for notes about that module/file
+
+### When to save (\`memory_store\`)
+- After fixing a bug: type \"episodic\", include what broke and the fix
+- After learning a project fact (architecture, conventions, key paths): type \"semantic\", include a title
+- After figuring out a procedure (build steps, deploy process, test commands): type \"procedural\"
+- After noticing a recurring pattern: type \"pattern\", importance 0.8
+
+### Rules
+- Search before storing to avoid duplicates
+- Be concise: 1-3 sentences per memory
+- Use lowercase hyphenated tags
+- Don't store trivial actions (simple reads, ls commands)
+- Don't ask the user before saving — just do it silently
+$MARKER_END"
+
+mkdir -p "$(dirname "$CLAUDE_MD")"
+
+if [ -f "$CLAUDE_MD" ] && grep -q "$MARKER_START" "$CLAUDE_MD"; then
+  # Replace existing section: remove old markers+content, write new
+  TMPFILE="$(mktemp)"
+  awk -v start="$MARKER_START" -v end="$MARKER_END" '
+    $0 == start { skip=1; next }
+    $0 == end { skip=0; next }
+    !skip { print }
+  ' "$CLAUDE_MD" > "$TMPFILE"
+  mv "$TMPFILE" "$CLAUDE_MD"
+  echo "$MEMORY_SECTION" >> "$CLAUDE_MD"
+  echo "  Updated existing memory section in CLAUDE.md"
+else
+  # Append to file (create if needed)
+  if [ -f "$CLAUDE_MD" ]; then
+    echo "" >> "$CLAUDE_MD"
+  fi
+  echo "$MEMORY_SECTION" >> "$CLAUDE_MD"
+  echo "  Added memory section to CLAUDE.md"
+fi
+
 echo ""
 echo "Installation complete!"
 echo ""

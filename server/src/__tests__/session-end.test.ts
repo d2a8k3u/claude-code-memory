@@ -106,6 +106,33 @@ describe('handleSessionEnd - structured records', () => {
     cleanup(db, dir);
   });
 
+  it('parses Claude Code wrapped transcript format', async () => {
+    const transcriptPath = writeTranscript(dir, [
+      { type: 'user', message: { role: 'user', content: 'Refactor the auth module' } },
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', name: 'Edit', input: { file_path: '/src/auth.ts' } },
+            { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } },
+          ],
+        },
+      },
+    ]);
+
+    await handleSessionEnd(db, { transcript_path: transcriptPath, cwd: dir });
+
+    const memories = db.listMemories('episodic', 10, 0);
+    assert.ok(memories.length >= 1, `Expected at least 1 memory, got ${memories.length}`);
+    const main = memories.find((m) => JSON.parse(m.tags).includes('session-end'));
+    assert.ok(main, 'Should have a session-end tagged memory');
+    assert.ok(main.content.includes('Refactor the auth module'));
+    assert.ok(main.content.includes('Bash'));
+
+    cleanup(db, dir);
+  });
+
   it('returns ok when no transcript content', async () => {
     const result = await handleSessionEnd(db, { cwd: dir });
     assert.deepEqual(result, { ok: true });
