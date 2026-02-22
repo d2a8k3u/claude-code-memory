@@ -30,12 +30,18 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
 
   for (const line of lines) {
     if (!line.trim()) continue;
-    let msg: Record<string, unknown>;
+    let raw: Record<string, unknown>;
     try {
-      msg = JSON.parse(line);
+      raw = JSON.parse(line);
     } catch {
       continue;
     }
+
+    // Claude Code transcripts nest the API message inside a `message` field
+    const msg = (typeof raw.message === 'object' && raw.message !== null ? raw.message : raw) as Record<
+      string,
+      unknown
+    >;
 
     // First user message -> task description
     if (!result.taskSummary && msg.role === 'user') {
