@@ -47,18 +47,28 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
   });
 
   it('falls back to static sections when no signals exist', async () => {
-    seedMemory(db, 'sem-1', {
-      type: 'semantic',
-      title: 'Project Architecture',
-      content: 'Uses microservices with event-driven communication',
-      importance: 0.8,
-    }, 1);
-    seedMemory(db, 'proc-1', {
-      type: 'procedural',
-      title: 'Deploy Process',
-      content: 'Run npm build then docker push',
-      importance: 0.7,
-    }, 2);
+    seedMemory(
+      db,
+      'sem-1',
+      {
+        type: 'semantic',
+        title: 'Project Architecture',
+        content: 'Uses microservices with event-driven communication',
+        importance: 0.8,
+      },
+      1,
+    );
+    seedMemory(
+      db,
+      'proc-1',
+      {
+        type: 'procedural',
+        title: 'Deploy Process',
+        content: 'Run npm build then docker push',
+        importance: 0.7,
+      },
+      2,
+    );
 
     // Use a CWD with all segments < 3 chars so no CWD signals are produced
     const result = await handleSessionStart(db, { cwd: '/a/bb' });
@@ -72,12 +82,17 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
   });
 
   it('deduplicates memories across sections', async () => {
-    seedMemory(db, 'shared-1', {
-      type: 'semantic',
-      title: 'Shared Memory',
-      content: 'This memory is highly important and relevant',
-      importance: 0.9,
-    }, 1);
+    seedMemory(
+      db,
+      'shared-1',
+      {
+        type: 'semantic',
+        title: 'Shared Memory',
+        content: 'This memory is highly important and relevant',
+        importance: 0.9,
+      },
+      1,
+    );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const ctx = result.hookSpecificOutput!.additionalContext;
@@ -88,16 +103,26 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
   });
 
   it('includes Key Knowledge section with only semantic memories when using static fallback', async () => {
-    seedMemory(db, 'sem-1', {
-      type: 'semantic',
-      content: 'A semantic fact about the project',
-      importance: 0.8,
-    }, 1);
-    seedMemory(db, 'ep-1', {
-      type: 'episodic',
-      content: 'Something that happened recently',
-      importance: 0.8,
-    }, 2);
+    seedMemory(
+      db,
+      'sem-1',
+      {
+        type: 'semantic',
+        content: 'A semantic fact about the project',
+        importance: 0.8,
+      },
+      1,
+    );
+    seedMemory(
+      db,
+      'ep-1',
+      {
+        type: 'episodic',
+        content: 'Something that happened recently',
+        importance: 0.8,
+      },
+      2,
+    );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const ctx = result.hookSpecificOutput!.additionalContext;
@@ -105,20 +130,23 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     const keyKnowledgeIdx = ctx.indexOf('## Key Knowledge');
     if (keyKnowledgeIdx >= 0) {
       const nextSectionIdx = ctx.indexOf('\n##', keyKnowledgeIdx + 1);
-      const section = nextSectionIdx >= 0
-        ? ctx.slice(keyKnowledgeIdx, nextSectionIdx)
-        : ctx.slice(keyKnowledgeIdx);
+      const section = nextSectionIdx >= 0 ? ctx.slice(keyKnowledgeIdx, nextSectionIdx) : ctx.slice(keyKnowledgeIdx);
       assert.ok(!section.includes('[episodic]'), 'Key Knowledge should not contain episodic memories');
     }
     cleanup(db, dir);
   });
 
   it('includes recent episodic memories in Recent Sessions', async () => {
-    seedMemory(db, 'ep-1', {
-      type: 'episodic',
-      content: 'Worked on authentication module',
-      context: 'auth project',
-    }, 1);
+    seedMemory(
+      db,
+      'ep-1',
+      {
+        type: 'episodic',
+        content: 'Worked on authentication module',
+        context: 'auth project',
+      },
+      1,
+    );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const ctx = result.hookSpecificOutput!.additionalContext;
@@ -129,12 +157,17 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
   });
 
   it('includes patterns section', async () => {
-    seedMemory(db, 'pat-1', {
-      type: 'pattern',
-      title: 'Error Handling Pattern',
-      content: 'Always use Result types instead of exceptions',
-      importance: 0.8,
-    }, 1);
+    seedMemory(
+      db,
+      'pat-1',
+      {
+        type: 'pattern',
+        title: 'Error Handling Pattern',
+        content: 'Always use Result types instead of exceptions',
+        importance: 0.8,
+      },
+      1,
+    );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const ctx = result.hookSpecificOutput!.additionalContext;
@@ -144,44 +177,52 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     cleanup(db, dir);
   });
 
-  it('triggers consolidation after 10 sessions with stats', async () => {
+  it('runs auto-consolidation after 10 sessions', async () => {
     db.setSessionMeta('session_count', '9');
     db.setSessionMeta('last_consolidation', '0');
 
-    // Add some memories so stats are non-empty
+    // Add some memories so consolidation has something to process
     seedMemory(db, 'sem-1', { type: 'semantic', content: 'fact one', importance: 0.5 }, 1);
     seedMemory(db, 'ep-1', { type: 'episodic', content: 'event one', importance: 0.5 }, 2);
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const ctx = result.hookSpecificOutput!.additionalContext;
 
-    assert.ok(ctx.includes('Consolidation Due'));
-    // Should include total count
-    assert.ok(ctx.includes('total'), 'Should include total count');
-    // Should include type breakdown
-    assert.ok(ctx.includes('semantic'), 'Should include type breakdown');
+    // Should NOT include old "Consolidation Due" prompt — consolidation is now automated
+    assert.ok(!ctx.includes('Consolidation Due'), 'Should not show old consolidation prompt');
+    // Session count should be updated
+    assert.ok(ctx.includes('session #10'));
+    // last_consolidation should be updated
+    assert.equal(db.getSessionMeta('last_consolidation'), '10');
     cleanup(db, dir);
   });
 
-  it('consolidation prompt includes stale/duplicate counts when nonzero', async () => {
+  it('auto-consolidation deletes stale memories', async () => {
     db.setSessionMeta('session_count', '9');
     db.setSessionMeta('last_consolidation', '0');
 
-    const oldDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
-    seedMemory(db, 'stale-1', {
-      type: 'semantic',
-      content: 'stale memory content',
-      importance: 0.1,
-      access_count: 0,
-      created_at: oldDate,
-      updated_at: oldDate,
-    }, 1);
+    const oldDate = new Date(Date.now() - 61 * 24 * 60 * 60 * 1000).toISOString();
+    seedMemory(
+      db,
+      'stale-1',
+      {
+        type: 'semantic',
+        content: 'stale memory content',
+        importance: 0.05,
+        access_count: 0,
+        created_at: oldDate,
+        updated_at: oldDate,
+      },
+      1,
+    );
 
+    const beforeCount = db.countMemories();
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const ctx = result.hookSpecificOutput!.additionalContext;
+    const afterCount = db.countMemories();
 
-    assert.ok(ctx.includes('Consolidation Due'));
-    assert.ok(ctx.includes('stale memor'), 'Should mention stale memories');
+    assert.ok(afterCount < beforeCount, 'Stale memory should be deleted');
+    assert.ok(ctx.includes('stale deleted'), 'Should report stale deletions');
     cleanup(db, dir);
   });
 
@@ -197,10 +238,15 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
   });
 
   it('cleans up working memories', async () => {
-    seedMemory(db, 'working-1', {
-      type: 'working',
-      content: 'Temporary scratchpad data',
-    }, 1);
+    seedMemory(
+      db,
+      'working-1',
+      {
+        type: 'working',
+        content: 'Temporary scratchpad data',
+      },
+      1,
+    );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const ctx = result.hookSpecificOutput!.additionalContext;
