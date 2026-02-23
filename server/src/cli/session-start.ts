@@ -1,8 +1,15 @@
 import type { MemoryDatabase, ScoredMemoryRow } from '../database.js';
 import type { MemoryRow } from '../types.js';
-import { generateEmbeddings, warmEmbeddingModel } from '../embeddings.js';
+import {
+  generateEmbeddings,
+  warmEmbeddingModel,
+  embeddingToBuffer,
+  bufferToEmbedding,
+  cosineSimilarity,
+} from '../embeddings.js';
 import type { HookInput, HookOutput } from './types.js';
 import { extractGitSignals } from './git-signals.js';
+import { makeMemoryRecord, derivePatternTitle } from './shared.js';
 
 interface SearchChannel {
   query: string;
@@ -51,9 +58,9 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   const channelEmbeddings = embeddings.slice(0, channels.length);
   const overviewEmbedding = overviewQuery
-    ? (allQueries.indexOf(overviewQuery) < channels.length
-        ? channelEmbeddings[allQueries.indexOf(overviewQuery)]
-        : embeddings[embeddings.length - 1])
+    ? allQueries.indexOf(overviewQuery) < channels.length
+      ? channelEmbeddings[allQueries.indexOf(overviewQuery)]
+      : embeddings[embeddings.length - 1]
     : null;
 
   const sections: string[] = [];
@@ -76,9 +83,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
       }
     }
 
-    const ranked = [...mergedScores.values()]
-      .sort((a, b) => b.bestScore - a.bestScore)
-      .slice(0, 10);
+    const ranked = [...mergedScores.values()].sort((a, b) => b.bestScore - a.bestScore).slice(0, 10);
 
     if (ranked.length > 0) {
       sections.push('## Relevant to Current Work');
@@ -98,7 +103,8 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   });
 
   if (overviewQuery && overviewEmbedding) {
-    const semanticResults = db.hybridSearchMemories(overviewQuery, overviewEmbedding, 20)
+    const semanticResults = db
+      .hybridSearchMemories(overviewQuery, overviewEmbedding, 20)
       .filter((r) => r.type === 'semantic')
       .slice(0, 5);
     appendSection(sections, seenIds, semanticResults, '\n## Key Knowledge', (mem) => {
@@ -120,7 +126,8 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   });
 
   if (overviewQuery && overviewEmbedding) {
-    const procedureResults = db.hybridSearchMemories(overviewQuery, overviewEmbedding, 15)
+    const procedureResults = db
+      .hybridSearchMemories(overviewQuery, overviewEmbedding, 15)
       .filter((r) => r.type === 'procedural')
       .slice(0, 3);
     appendSection(sections, seenIds, procedureResults, '\n## Procedures', (mem) => {
@@ -137,47 +144,21 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   const lastConsolidation = parseInt(db.getSessionMeta('last_consolidation') ?? '0', 10);
   const consolidationNeeded = sessionCount - lastConsolidation >= 10;
+
+  let consolidationNote = '';
   if (consolidationNeeded) {
     db.setSessionMeta('last_consolidation', String(sessionCount));
+    consolidationNote = await autoConsolidate(db);
   }
 
   const cleanupParts: string[] = [];
   if (workingCleaned) cleanupParts.push(`${workingCleaned} working cleared`);
   if (episodicCleaned) cleanupParts.push(`${episodicCleaned} old episodic archived`);
   if (decayed) cleanupParts.push(`${decayed} decayed`);
+  if (consolidationNote) cleanupParts.push(consolidationNote);
   const cleanupNote = cleanupParts.length > 0 ? ` (${cleanupParts.join(', ')})` : '';
 
   const header = `# Project Memory Context (${seenIds.size} items loaded, session #${sessionCount})${cleanupNote}\n`;
-
-  let consolidationPrompt = '';
-  if (consolidationNeeded) {
-    const curationStats = db.getCurationStats();
-    const typeBreakdown = Object.entries(curationStats.byType)
-      .map(([type, count]) => `${count} ${type}`)
-      .join(', ');
-
-    const findings: string[] = [];
-    if (curationStats.duplicateCandidateCount > 0) {
-      findings.push(`- **${curationStats.duplicateCandidateCount} near-duplicate pairs** detected — review and merge or differentiate`);
-    }
-    if (curationStats.staleCount > 0) {
-      findings.push(`- **${curationStats.staleCount} stale memories** (importance < 0.2, access < 2, older than 30 days) — consider deleting or boosting`);
-    }
-    const findingsBlock = findings.length > 0 ? `\n${findings.join('\n')}\n` : '';
-
-    consolidationPrompt = `
-
-### Consolidation Due
-
-Memory system stats: **${curationStats.total} total** memories (${typeBreakdown}).
-${findingsBlock}
-Before starting the user's task, spend a moment on memory maintenance:
-1. \`memory_search\` broad terms to find duplicates → merge or delete redundant ones
-2. Multiple episodic memories about the same topic → create one \`pattern\` memory
-3. Lower importance of stale memories not worth keeping
-4. Check for contradictions → link with \`contradicts\` relation
-5. Briefly report what you cleaned up, then proceed with the task`;
-  }
 
   const behavioralReminder = `
 
@@ -187,7 +168,7 @@ You MUST call \`memory_search\` silently (without asking the user):
 - **Before starting work** — search for prior work on the module/feature the user is asking about
 - **During work** — whenever you encounter a topic, convention, or decision the user might have discussed before, search memory instead of asking or guessing. The user should never have to say "check your memory" — recall proactively.`;
 
-  const context = header + sections.join('\n') + consolidationPrompt + behavioralReminder;
+  const context = header + sections.join('\n') + behavioralReminder;
 
   return {
     hookSpecificOutput: {
@@ -195,6 +176,125 @@ You MUST call \`memory_search\` silently (without asking the user):
       additionalContext: context,
     },
   };
+}
+
+async function autoConsolidate(db: MemoryDatabase): Promise<string> {
+  const actions: string[] = [];
+
+  const types = ['episodic', 'semantic', 'procedural', 'pattern'] as const;
+  let totalMerged = 0;
+
+  for (const type of types) {
+    const pairs = db.findNearDuplicatePairs(type, 0.08, 10);
+    for (const pair of pairs) {
+      if (db.mergeMemories(pair.id1, pair.id2)) {
+        totalMerged++;
+      }
+    }
+  }
+  if (totalMerged > 0) actions.push(`${totalMerged} duplicates merged`);
+
+  let patternsCreated = 0;
+  const recentEpisodics = db.getRecentEpisodicWithEmbeddings(30, 50);
+
+  if (recentEpisodics.length >= 3) {
+    const existingPatterns = db.getMemoriesByTypeWithEmbeddings('pattern', 20);
+    const clusters: number[][] = [];
+    const assigned = new Set<number>();
+
+    for (let i = 0; i < recentEpisodics.length; i++) {
+      if (assigned.has(i)) continue;
+      const cluster = [i];
+      assigned.add(i);
+
+      const embI = bufferToEmbedding(recentEpisodics[i].embedding);
+      for (let j = i + 1; j < recentEpisodics.length; j++) {
+        if (assigned.has(j)) continue;
+        const embJ = bufferToEmbedding(recentEpisodics[j].embedding);
+        const similarity = cosineSimilarity(embI, embJ);
+        if (similarity >= 0.4 && similarity <= 0.95) {
+          cluster.push(j);
+          assigned.add(j);
+        }
+      }
+
+      if (cluster.length >= 3) clusters.push(cluster);
+    }
+
+    const patternTexts: string[] = [];
+    const patternClusters: number[][] = [];
+
+    for (const cluster of clusters) {
+      const memberTexts = cluster.map((idx) => recentEpisodics[idx].content);
+
+      const dim = 384;
+      const centroid = new Float32Array(dim);
+      for (const idx of cluster) {
+        const emb = bufferToEmbedding(recentEpisodics[idx].embedding);
+        for (let d = 0; d < dim; d++) centroid[d] += emb[d];
+      }
+      for (let d = 0; d < dim; d++) centroid[d] /= cluster.length;
+      let norm = 0;
+      for (let d = 0; d < dim; d++) norm += centroid[d] * centroid[d];
+      norm = Math.sqrt(norm);
+      if (norm > 0) for (let d = 0; d < dim; d++) centroid[d] /= norm;
+
+      let covered = false;
+      for (const pat of existingPatterns) {
+        const patEmb = bufferToEmbedding(pat.embedding);
+        if (cosineSimilarity(centroid, patEmb) > 0.5) {
+          covered = true;
+          break;
+        }
+      }
+      if (covered) continue;
+
+      const title = derivePatternTitle(memberTexts);
+      const content = `Recurring theme across ${cluster.length} sessions: ${memberTexts.join(' | ')}`;
+      patternTexts.push(`${title}: ${content}`);
+      patternClusters.push(cluster);
+    }
+
+    if (patternTexts.length > 0) {
+      const patternEmbeddings = await generateEmbeddings(patternTexts);
+
+      for (let i = 0; i < patternClusters.length; i++) {
+        const emb = patternEmbeddings[i];
+        if (!emb) continue;
+
+        const similar = db.findSimilarMemory(emb, 0.05);
+        if (similar) continue;
+
+        const cluster = patternClusters[i];
+        const memberTexts = cluster.map((idx) => recentEpisodics[idx].content);
+        const title = derivePatternTitle(memberTexts);
+        const content = patternTexts[i].slice(patternTexts[i].indexOf(':') + 2);
+
+        const record = makeMemoryRecord('pattern', content, ['auto-pattern'], {
+          title,
+          importance: 0.8,
+          context: 'auto-consolidation',
+        });
+        record.embedding = embeddingToBuffer(emb);
+        db.insertMemory(record);
+
+        for (const idx of cluster) {
+          try {
+            db.addRelation(record.id, recentEpisodics[idx].id, 'derived_from', 0.7);
+          } catch {
+            // Not critical
+          }
+        }
+        patternsCreated++;
+      }
+    }
+  }
+  if (patternsCreated > 0) actions.push(`${patternsCreated} patterns created`);
+
+  const staleDeleted = db.deleteStaleMemories(60, 0.1, 0);
+  if (staleDeleted > 0) actions.push(`${staleDeleted} stale deleted`);
+
+  return actions.join(', ');
 }
 
 function appendSection(
