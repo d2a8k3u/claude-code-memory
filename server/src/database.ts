@@ -185,7 +185,7 @@ export class MemoryDatabase {
   }
 
   getMemoryByIdRaw(id: string): MemoryRow | null {
-    return this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as MemoryRow | undefined ?? null;
+    return (this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as MemoryRow | undefined) ?? null;
   }
 
   get path(): string {
@@ -566,6 +566,140 @@ export class MemoryDatabase {
 
   // --- Convenience Queries ---
 
+  getRecentEpisodicWithEmbeddings(maxAgeDays: number, limit: number): (MemoryRow & { embedding: Buffer })[] {
+    const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
+    return this.db
+      .prepare(
+        `SELECT * FROM memories
+         WHERE type = 'episodic' AND embedding IS NOT NULL AND created_at >= ?
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(cutoff, limit) as (MemoryRow & { embedding: Buffer })[];
+  }
+
+  getMemoriesByTypeWithEmbeddings(type: MemoryType, limit: number): (MemoryRow & { embedding: Buffer })[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM memories
+         WHERE type = ? AND embedding IS NOT NULL
+         ORDER BY importance DESC, created_at DESC LIMIT ?`,
+      )
+      .all(type, limit) as (MemoryRow & { embedding: Buffer })[];
+  }
+
+  mergeMemories(keepId: string, deleteId: string): boolean {
+    const keep = this.getMemoryByIdRaw(keepId);
+    const del = this.getMemoryByIdRaw(deleteId);
+    if (!keep || !del) return false;
+
+    const keepTags: string[] = JSON.parse(keep.tags);
+    const delTags: string[] = JSON.parse(del.tags);
+    const mergedTags = [...new Set([...keepTags, ...delTags])];
+
+    const mergedContent = keep.content.length >= del.content.length ? keep.content : del.content;
+    const mergedImportance = Math.min(0.95, Math.max(keep.importance, del.importance) + 0.05);
+
+    const tx = this.db.transaction(() => {
+      const rels = this.getRelations(deleteId);
+      for (const rel of rels) {
+        const newSource = rel.source_id === deleteId ? keepId : rel.source_id;
+        const newTarget = rel.target_id === deleteId ? keepId : rel.target_id;
+        if (newSource !== newTarget) {
+          try {
+            this.addRelation(newSource, newTarget, rel.relation_type, rel.weight);
+          } catch {
+            // Relation already exists
+          }
+        }
+      }
+
+      this.updateMemory(keepId, {
+        content: mergedContent,
+        tags: JSON.stringify(mergedTags),
+        importance: mergedImportance,
+      });
+
+      this.deleteMemory(deleteId);
+    });
+    tx();
+    return true;
+  }
+
+  findNearDuplicatePairs(
+    type: MemoryType,
+    threshold: number,
+    limit: number,
+  ): { id1: string; id2: string; distance: number }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, embedding FROM memories
+         WHERE type = ? AND embedding IS NOT NULL
+         ORDER BY created_at DESC LIMIT 100`,
+      )
+      .all(type) as { id: string; embedding: Buffer }[];
+
+    const pairs: { id1: string; id2: string; distance: number }[] = [];
+    const seenPairs = new Set<string>();
+
+    for (const row of rows) {
+      const emb = bufferToEmbedding(row.embedding);
+      const neighbors = this.db
+        .prepare(
+          `SELECT v.distance, m.id
+           FROM (
+             SELECT rowid AS vec_rowid, distance
+             FROM memories_vec
+             WHERE embedding MATCH ?
+             ORDER BY distance
+             LIMIT 5
+           ) v
+           JOIN memories m ON m.rowid = v.vec_rowid
+           WHERE m.type = ?`,
+        )
+        .all(emb, type) as { id: string; distance: number }[];
+
+      for (const n of neighbors) {
+        if (n.id === row.id) continue;
+        if (n.distance >= threshold) continue;
+        const pairKey = [row.id, n.id].sort().join(':');
+        if (seenPairs.has(pairKey)) continue;
+        seenPairs.add(pairKey);
+        pairs.push({ id1: row.id, id2: n.id, distance: n.distance });
+      }
+
+      if (pairs.length >= limit) break;
+    }
+
+    return pairs.slice(0, limit);
+  }
+
+  deleteStaleMemories(maxAgeDays: number, maxImportance: number, maxAccessCount: number): number {
+    const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
+    const tx = this.db.transaction(() => {
+      const targets = this.db
+        .prepare(
+          `SELECT rowid, id FROM memories
+           WHERE created_at < ?
+             AND importance < ?
+             AND access_count <= ?
+             AND type NOT IN ('pattern', 'procedural')`,
+        )
+        .all(cutoff, maxImportance, maxAccessCount) as { rowid: number; id: string }[];
+
+      if (targets.length === 0) return 0;
+
+      for (const t of targets) {
+        this.db.prepare('DELETE FROM memories_fts WHERE rowid = ?').run(t.rowid);
+        this.db.prepare('DELETE FROM memories_vec WHERE rowid = ?').run(t.rowid);
+      }
+      const placeholders = targets.map(() => '?').join(',');
+      const ids = targets.map((t) => t.id);
+      const result = this.db.prepare(`DELETE FROM memories WHERE id IN (${placeholders})`).run(...ids);
+      return result.changes;
+    });
+    return tx();
+  }
+
   getRecentByType(type: string, limit: number): MemoryRow[] {
     return this.db
       .prepare('SELECT * FROM memories WHERE type = ? ORDER BY created_at DESC LIMIT ?')
@@ -595,9 +729,10 @@ export class MemoryDatabase {
   } {
     const total = this.countMemories();
 
-    const typeRows = this.db
-      .prepare('SELECT type, COUNT(*) as count FROM memories GROUP BY type')
-      .all() as { type: string; count: number }[];
+    const typeRows = this.db.prepare('SELECT type, COUNT(*) as count FROM memories GROUP BY type').all() as {
+      type: string;
+      count: number;
+    }[];
     const byType: Record<string, number> = {};
     for (const row of typeRows) byType[row.type] = row.count;
 
@@ -626,10 +761,14 @@ export class MemoryDatabase {
       this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE created_at >= ?').get(d24h) as { count: number }
     ).count;
     const last7d = (
-      this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE created_at >= ? AND created_at < ?').get(d7d, d24h) as { count: number }
+      this.db
+        .prepare('SELECT COUNT(*) as count FROM memories WHERE created_at >= ? AND created_at < ?')
+        .get(d7d, d24h) as { count: number }
     ).count;
     const last30d = (
-      this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE created_at >= ? AND created_at < ?').get(d30d, d7d) as { count: number }
+      this.db
+        .prepare('SELECT COUNT(*) as count FROM memories WHERE created_at >= ? AND created_at < ?')
+        .get(d30d, d7d) as { count: number }
     ).count;
     const older = total - last24h - last7d - last30d;
 
@@ -656,9 +795,10 @@ export class MemoryDatabase {
   } {
     const total = this.countMemories();
 
-    const typeRows = this.db
-      .prepare('SELECT type, COUNT(*) as count FROM memories GROUP BY type')
-      .all() as { type: string; count: number }[];
+    const typeRows = this.db.prepare('SELECT type, COUNT(*) as count FROM memories GROUP BY type').all() as {
+      type: string;
+      count: number;
+    }[];
     const byType: Record<string, number> = {};
     for (const row of typeRows) byType[row.type] = row.count;
 
@@ -702,7 +842,7 @@ export class MemoryDatabase {
 
       for (const n of neighbors) {
         if (n.id === row.id) continue;
-        if (n.distance >= 0.05 && n.distance < 0.10) {
+        if (n.distance >= 0.05 && n.distance < 0.1) {
           const pairKey = [row.id, n.id].sort().join(':');
           if (!seenPairs.has(pairKey)) {
             seenPairs.add(pairKey);
