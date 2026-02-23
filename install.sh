@@ -198,11 +198,19 @@ You have project memory via MCP tools (\`memory_store\`, \`memory_search\`, etc.
 - When encountering errors: search with error message keywords
 - When touching unfamiliar code: search for notes about that module/file
 
-### When to save (\`memory_store\`)
-- After fixing a bug: type \"episodic\", include what broke and the fix
-- After learning a project fact (architecture, conventions, key paths): type \"semantic\", include a title
-- After figuring out a procedure (build steps, deploy process, test commands): type \"procedural\"
-- After noticing a recurring pattern: type \"pattern\", importance 0.8
+### Auto-saved memories
+The session hooks automatically create memories from your work:
+- **episodic**: Session summaries (task, tools, files, errors) — saved every session
+- **procedural**: Build/test/deploy workflows extracted from successful bash command sequences
+- **semantic**: Technology stack and active module detection from commands and file types
+- **pattern**: Recurring themes detected by clustering similar episodic memories
+
+### When to save manually (\`memory_store\`)
+Auto-save covers routine facts. Use \`memory_store\` manually for insights automation might miss:
+- Important architectural decisions or design rationale
+- Non-obvious bug fixes worth remembering
+- User preferences or project-specific conventions
+- Corrections to auto-created memories
 
 ### Rules
 - Search before storing to avoid duplicates
