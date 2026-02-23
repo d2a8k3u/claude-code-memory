@@ -179,7 +179,15 @@ Before starting the user's task, spend a moment on memory maintenance:
 5. Briefly report what you cleaned up, then proceed with the task`;
   }
 
-  const context = header + sections.join('\n') + consolidationPrompt;
+  const behavioralReminder = `
+
+---
+**CRITICAL The context above is a broad overview loaded from git signals — it is NOT a substitute for active searching.**
+You MUST call \`memory_search\` silently (without asking the user):
+- **Before starting work** — search for prior work on the module/feature the user is asking about
+- **During work** — whenever you encounter a topic, convention, or decision the user might have discussed before, search memory instead of asking or guessing. The user should never have to say "check your memory" — recall proactively.`;
+
+  const context = header + sections.join('\n') + consolidationPrompt + behavioralReminder;
 
   return {
     hookSpecificOutput: {

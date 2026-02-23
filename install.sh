@@ -189,8 +189,11 @@ MEMORY_SECTION="$MARKER_START
 
 You have project memory via MCP tools (\`memory_store\`, \`memory_search\`, etc.). Use them proactively and automatically — never ask the user before saving or searching.
 
+**CRITICAL: The SessionStart hook injects a broad overview of memories based on git signals. This passive context is NOT a substitute for active \`memory_search\` calls. You MUST still search actively throughout the session.**
+
 ### When to search (\`memory_search\`)
-- At the start of any non-trivial task: search for prior work on the same module/feature
+- **ALWAYS at the start of any non-trivial task**: search for prior work on the module/feature you are about to touch. Do this BEFORE writing any code.
+- **During work**: whenever you encounter a topic, convention, or decision the user might have discussed before — search memory instead of asking or guessing. The user should never have to say \"check your memory\".
 - Before making architectural decisions: search for prior decisions (type \"pattern\")
 - When encountering errors: search with error message keywords
 - When touching unfamiliar code: search for notes about that module/file
