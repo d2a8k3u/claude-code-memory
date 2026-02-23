@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-02-24
+
+### Added
+
+- **Auto-creation of memory types** — session-end hook now creates procedural, semantic, and pattern memories automatically, not just episodic
+  - **Procedural**: extracted from successful bash command sequences (build, test, lint, deploy workflows) when 2+ related commands run in a session
+  - **Semantic**: technology stack detection from commands and file extensions, active module detection from modified file paths
+  - **Pattern**: clustering of similar episodic memories (3+ with cosine similarity 0.40–0.95) with `derived_from` relations to source memories
+- **Automated consolidation** — replaces the prompt-based "Consolidation Due" that Claude ignored
+  - Merges near-duplicate memory pairs (cosine distance < 0.08, same type)
+  - Detects patterns across all recent episodics
+  - Deletes truly stale memories (importance < 0.1, access_count = 0, age > 60 days, excludes pattern/procedural)
+  - Runs every 10 sessions, reports results in session header (e.g. "3 duplicates merged, 1 stale deleted")
+- Enriched transcript parsing: bash command tracking with success/failure correlation via tool_use_id, files read, technology detection
+- New database methods: `getRecentEpisodicWithEmbeddings`, `getMemoriesByTypeWithEmbeddings`, `mergeMemories`, `findNearDuplicatePairs`, `deleteStaleMemories`
+- Shared utilities module (`shared.ts`): `makeMemoryRecord`, `derivePatternTitle`, `STOP_WORDS`
+- Auto-created records tagged distinctively: `auto-procedural`, `auto-semantic`, `auto-pattern`
+
+### Changed
+
+- Session-end now batches all embeddings in a single `generateEmbeddings()` call instead of sequential `generateEmbedding()` calls
+- Session-end deduplicates new procedural/semantic records against existing memories before insertion (cosine distance < 0.05)
+- CLAUDE.md instructions updated: documents auto-saved memory types, repositions manual `memory_store` as supplementary for insights automation might miss
+
 ## [0.1.3] - 2026-02-23
 
 ### Improved
@@ -52,6 +76,7 @@ Initial release of claude-code-memory.
 - Install script with MCP server registration, skills, hooks, and permissions setup
 - MIT license
 
+[0.2.0]: https://github.com/d2a8k3u/claude-code-memory/releases/tag/v0.2.0
 [0.1.3]: https://github.com/d2a8k3u/claude-code-memory/releases/tag/v0.1.3
 [0.1.2]: https://github.com/d2a8k3u/claude-code-memory/releases/tag/v0.1.2
 [0.1.1]: https://github.com/d2a8k3u/claude-code-memory/releases/tag/v0.1.1
