@@ -1,7 +1,7 @@
 {
   "name": "claude-memory",
   "description": "Fully automatic per-project cognitive memory. Auto-loads git-aware context at session start, auto-saves session summaries, auto-recalls on errors, and auto-consolidates every 10 sessions. 9 MCP tools for episodic, semantic, procedural, working, and pattern memories with hybrid FTS5 + vector search.",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "author": {
     "name": "David Kulhanek"
   },
