@@ -7,6 +7,7 @@ import { readStdin, writeHookOutput } from './cli/types.js';
 import { handleSessionStart } from './cli/session-start.js';
 import { handleSessionEnd } from './cli/session-end.js';
 import { handleErrorContext } from './cli/error-context.js';
+import { handleReorganize } from './cli/reorganize.js';
 
 const subcommand = process.argv[2];
 
@@ -21,9 +22,13 @@ async function main() {
   const cwd = input.cwd ?? process.cwd();
   const dbPath = join(cwd, '.claude', 'memory-db', 'memory.sqlite');
 
-  // For session-start and error-context: missing DB means nothing to load
-  if (subcommand !== 'session-end' && !existsSync(dbPath)) {
+  if (subcommand !== 'session-end' && subcommand !== 'reorganize' && !existsSync(dbPath)) {
     process.exit(0);
+  }
+
+  if (subcommand === 'reorganize' && !existsSync(dbPath)) {
+    console.error('No memory database found. Run a session first to create the database.');
+    process.exit(1);
   }
 
   const db = new MemoryDatabase(dbPath);
@@ -44,6 +49,11 @@ async function main() {
         if (result) {
           writeHookOutput(result);
         }
+        break;
+      }
+      case 'reorganize': {
+        const result = await handleReorganize(db, input);
+        writeHookOutput(result);
         break;
       }
       default:
