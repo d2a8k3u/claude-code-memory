@@ -543,10 +543,23 @@ export class MemoryDatabase {
       .map(({ id, distance }) => ({ id, distance }));
   }
 
-  findSimilarMemory(embedding: Float32Array, threshold = 0.05): { id: string; distance: number } | null {
-    const rows = this.db
-      .prepare(
-        `SELECT v.vec_rowid, v.distance, m.id
+  findSimilarMemory(
+    embedding: Float32Array,
+    threshold = 0.05,
+    type?: MemoryType,
+  ): { id: string; distance: number } | null {
+    const sql = type
+      ? `SELECT v.vec_rowid, v.distance, m.id
+         FROM (
+           SELECT rowid AS vec_rowid, distance
+           FROM memories_vec
+           WHERE embedding MATCH ?
+           ORDER BY distance
+           LIMIT 5
+         ) v
+         JOIN memories m ON m.rowid = v.vec_rowid
+         WHERE m.type = ?`
+      : `SELECT v.vec_rowid, v.distance, m.id
          FROM (
            SELECT rowid AS vec_rowid, distance
            FROM memories_vec
@@ -554,14 +567,21 @@ export class MemoryDatabase {
            ORDER BY distance
            LIMIT 1
          ) v
-         JOIN memories m ON m.rowid = v.vec_rowid`,
-      )
-      .all(embedding) as { id: string; distance: number; vec_rowid: number }[];
+         JOIN memories m ON m.rowid = v.vec_rowid`;
+
+    const rows = (
+      type ? this.db.prepare(sql).all(embedding, type) : this.db.prepare(sql).all(embedding)
+    ) as { id: string; distance: number; vec_rowid: number }[];
 
     if (rows.length > 0 && rows[0].distance < threshold) {
       return { id: rows[0].id, distance: rows[0].distance };
     }
     return null;
+  }
+
+  transaction<T>(fn: () => T): T {
+    const tx = this.db.transaction(fn);
+    return tx();
   }
 
   // --- Convenience Queries ---
