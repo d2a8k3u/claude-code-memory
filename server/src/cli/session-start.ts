@@ -10,6 +10,8 @@ import {
 import type { HookInput, HookOutput } from './types.js';
 import { extractGitSignals } from './git-signals.js';
 import { makeMemoryRecord, derivePatternTitle } from './shared.js';
+import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
+import { safeParseTags } from '../merge-utils.js';
 
 interface SearchChannel {
   query: string;
@@ -147,8 +149,12 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   let consolidationNote = '';
   if (consolidationNeeded) {
-    db.setSessionMeta('last_consolidation', String(sessionCount));
-    consolidationNote = await autoConsolidate(db);
+    try {
+      consolidationNote = await autoConsolidate(db);
+      db.setSessionMeta('last_consolidation', String(sessionCount));
+    } catch {
+      // Will retry next session
+    }
   }
 
   const cleanupParts: string[] = [];
@@ -193,6 +199,64 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
     }
   }
   if (totalMerged > 0) actions.push(`${totalMerged} duplicates merged`);
+
+  const splittableTypes = ['semantic', 'procedural', 'pattern'] as const;
+  const MAX_SPLITS_PER_CONSOLIDATION = 5;
+  let totalSplit = 0;
+  const consumedIds = new Set<string>();
+
+  for (const type of splittableTypes) {
+    if (totalSplit >= MAX_SPLITS_PER_CONSOLIDATION) break;
+    const memories = db.listMemories(type, 50, 0);
+    for (const mem of memories) {
+      if (totalSplit >= MAX_SPLITS_PER_CONSOLIDATION) break;
+      if (consumedIds.has(mem.id)) continue;
+
+      const tags = safeParseTags(mem.tags);
+      if (tags.includes('split-origin')) continue;
+
+      try {
+        const split = splitByTopics(mem.content, mem.title ?? undefined);
+        if (!split.shouldSplit) continue;
+
+        const result = await insertSplitSections(db, split.sections, {
+          type,
+          context: mem.context,
+          source: mem.source,
+          tags,
+          importance: mem.importance,
+        });
+
+        if (result.newIds.length >= 2) {
+          db.transaction(() => {
+            const existingRelations = db.getRelations(mem.id);
+            for (const rel of existingRelations) {
+              for (const newId of result.newIds) {
+                const sourceId = rel.source_id === mem.id ? newId : rel.source_id;
+                const targetId = rel.target_id === mem.id ? newId : rel.target_id;
+                if (sourceId !== targetId) {
+                  try {
+                    db.addRelation(sourceId, targetId, rel.relation_type, rel.weight);
+                  } catch {
+                    // INSERT OR REPLACE handles duplicates; catch covers unexpected errors
+                  }
+                }
+              }
+            }
+            db.deleteMemory(mem.id);
+          });
+
+          totalSplit++;
+          for (const mergedId of result.mergedIds) {
+            consumedIds.add(mergedId);
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  if (totalSplit > 0) actions.push(`${totalSplit} memories split by topic`);
 
   let patternsCreated = 0;
   const recentEpisodics = db.getRecentEpisodicWithEmbeddings(30, 50);
