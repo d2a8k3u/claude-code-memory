@@ -13,8 +13,19 @@ function sanitizeFtsQuery(query: string): string {
   return terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(' ');
 }
 
+// FTS5 BM25 produces near-zero scores when query terms appear in >50% of documents
+// (negative IDF). An FTS match still indicates topic relevance, so we apply a floor
+// to distinguish "FTS matched with common terms" from "FTS didn't match at all".
+const FTS_MATCH_FLOOR = 0.05;
+
+export type RelevanceFilterOptions = {
+  topicThreshold?: number;
+  relevanceThreshold?: number;
+};
+
 export interface ScoredMemoryRow extends MemoryRow {
   score: number;
+  textScore: number;
 }
 
 export class MemoryDatabase {
@@ -233,7 +244,12 @@ export class MemoryDatabase {
       .all({ query: safeQuery, limit }) as MemoryRow[];
   }
 
-  hybridSearchMemories(query: string, queryEmbedding: Float32Array | null, limit = 20): ScoredMemoryRow[] {
+  hybridSearchMemories(
+    query: string,
+    queryEmbedding: Float32Array | null,
+    limit = 20,
+    filter?: RelevanceFilterOptions,
+  ): ScoredMemoryRow[] {
     const ftsResults = new Map<string, { row: MemoryRow; ftsScore: number }>();
     const safeQuery = sanitizeFtsQuery(query);
     if (safeQuery) {
@@ -249,8 +265,8 @@ export class MemoryDatabase {
           .all({ query: safeQuery, limit: limit * 2 }) as (MemoryRow & { fts_rank: number })[];
 
         for (const row of ftsRows) {
-          const normalizedScore = Math.min(1, Math.max(0, -row.fts_rank / 20));
-          ftsResults.set(row.id, { row, ftsScore: normalizedScore });
+          const rawScore = Math.min(1, Math.max(0, -row.fts_rank / 20));
+          ftsResults.set(row.id, { row, ftsScore: Math.max(FTS_MATCH_FLOOR, rawScore) });
         }
       } catch {
         // FTS query syntax error - skip FTS
@@ -284,6 +300,8 @@ export class MemoryDatabase {
     const allIds = new Set([...ftsResults.keys(), ...vectorResults.keys()]);
     const scored: ScoredMemoryRow[] = [];
     const now = Date.now();
+    const topicThreshold = filter?.topicThreshold ?? 0.05;
+    const relevanceThreshold = filter?.relevanceThreshold ?? 0;
 
     for (const id of allIds) {
       const fts = ftsResults.get(id);
@@ -294,7 +312,19 @@ export class MemoryDatabase {
       const ftsScore = fts?.ftsScore ?? 0;
       const vecScore = vec?.vecScore ?? 0;
 
-      const textScore = queryEmbedding ? ftsScore * 0.4 + vecScore * 0.6 : ftsScore;
+      // Blend FTS and vector scores only when both signals exist for this memory.
+      // If a memory was found by FTS only (no embedding in vec), use full ftsScore
+      // to avoid diluting it by the 0.4 weight when vecScore is 0.
+      let textScore: number;
+      if (fts && vec) {
+        textScore = ftsScore * 0.4 + vecScore * 0.6;
+      } else if (vec) {
+        textScore = vecScore;
+      } else {
+        textScore = ftsScore;
+      }
+
+      if (textScore < topicThreshold) continue;
 
       const ageMs = now - new Date(row.created_at).getTime();
       const ageDays = ageMs / (1000 * 60 * 60 * 24);
@@ -304,7 +334,9 @@ export class MemoryDatabase {
 
       const finalScore = textScore * 0.5 + importanceWeight * 0.2 + recencyBoost * 0.2 + accessBoost * 0.1;
 
-      scored.push({ ...row, score: finalScore });
+      if (relevanceThreshold > 0 && finalScore < relevanceThreshold) continue;
+
+      scored.push({ ...row, score: finalScore, textScore });
     }
 
     scored.sort((a, b) => b.score - a.score);
@@ -341,6 +373,16 @@ export class MemoryDatabase {
          ORDER BY created_at DESC LIMIT @limit OFFSET @offset`,
       )
       .all({ limit, offset }) as MemoryRow[];
+  }
+
+  findMemoryByTag(type: MemoryType, tag: string): MemoryRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM memories WHERE type = @type AND tags LIKE @pattern
+         ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get({ type, pattern: `%"${tag}"%` }) as MemoryRow | undefined;
+    return row ?? null;
   }
 
   countMemories(type?: MemoryType): number {
