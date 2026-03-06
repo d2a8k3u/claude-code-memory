@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { statSync } from 'node:fs';
-import type { MemoryDatabase } from './database.js';
+import type { MemoryDatabase, RelevanceFilterOptions } from './database.js';
 import { generateEmbedding, generateEmbeddings, cosineSimilarity, isEmbeddingsAvailable } from './embeddings.js';
+import { rerankResults, overfetchLimit, isRerankerAvailable } from './reranker.js';
 import { rowToMemory, type Memory, type MemoryType, type RelationType } from './types.js';
 import { splitByTopics, insertSplitSections } from './topic-splitter.js';
 import { normalizeTags, safeParseTags, buildMergeUpdates } from './merge-utils.js';
@@ -23,14 +24,14 @@ export const memoryToolDefs = [
   {
     name: 'memory_store',
     description:
-      "Store a new memory. Use 'episodic' for session events, 'semantic' for project facts, 'procedural' for how-to workflows, 'working' for in-session scratchpad (auto-cleared next session), 'pattern' for consolidated insights from multiple observations.",
+      "Store a new memory. Use 'episodic' for session events, 'semantic' for project facts, 'procedural' for how-to workflows, 'working' for in-session scratchpad (auto-cleared next session), 'pattern' for consolidated insights from multiple observations. IMPORTANT: Always write content and title in English, even if the user communicates in another language. This ensures consistent search and retrieval.",
     schema: {
       type: z
         .enum(MEMORY_TYPES)
         .describe(
           'Memory type: episodic (events), semantic (facts), procedural (how-to), working (scratchpad), pattern (consolidated insights)',
         ),
-      content: z.string().describe('The memory content in markdown format'),
+      content: z.string().describe('The memory content in markdown format. Must be in English.'),
       title: z.string().optional().describe('Optional title (recommended for pattern and semantic types)'),
       context: z.string().optional().describe('Optional context in which the memory was formed'),
       source: z.string().optional().describe('Optional provenance (file path, URL, session)'),
@@ -51,6 +52,12 @@ export const memoryToolDefs = [
       query: z.string().describe('Search query - natural language works best for semantic matching'),
       type: z.enum(MEMORY_TYPES).optional().describe('Filter by memory type'),
       limit: z.number().optional().describe('Maximum results to return (default 20)'),
+      strictness: z
+        .enum(['low', 'normal', 'high'])
+        .optional()
+        .describe(
+          'Relevance filtering: low=permissive, normal=default, high=strict — controls minimum relevance quality',
+        ),
     },
   },
   {
@@ -92,7 +99,7 @@ export const memoryToolDefs = [
   {
     name: 'memory_store_batch',
     description:
-      'Store multiple memories at once. More efficient than calling memory_store repeatedly — generates embeddings in a single batch.',
+      'Store multiple memories at once. More efficient than calling memory_store repeatedly — generates embeddings in a single batch. IMPORTANT: All content and titles must be in English, even if the user communicates in another language.',
     schema: {
       memories: z
         .array(
@@ -310,6 +317,12 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
   );
 }
 
+const STRICTNESS_MAP: Record<string, RelevanceFilterOptions> = {
+  low: { topicThreshold: 0.02, relevanceThreshold: 0 },
+  normal: { topicThreshold: 0.05, relevanceThreshold: 0.10 },
+  high: { topicThreshold: 0.15, relevanceThreshold: 0.20 },
+};
+
 async function memorySearch(db: MemoryDatabase, args: Record<string, unknown>): Promise<ToolResult> {
   // Backfill missing embeddings on first search
   await backfillMissingEmbeddings(db);
@@ -317,11 +330,14 @@ async function memorySearch(db: MemoryDatabase, args: Record<string, unknown>): 
   const query = args.query as string;
   const type = args.type as MemoryType | undefined;
   const limit = (args.limit as number) ?? 20;
+  const filter = STRICTNESS_MAP[(args.strictness as string) ?? 'normal'];
 
   const queryEmbedding = await generateEmbedding(query);
 
-  let scored = db.hybridSearchMemories(query, queryEmbedding, limit);
+  // Over-fetch candidates for reranking
+  let scored = db.hybridSearchMemories(query, queryEmbedding, overfetchLimit(limit), filter);
 
+  // Type filter before reranking (don't waste cross-encoder on filtered-out results)
   if (type) {
     scored = scored.filter((r) => r.type === type);
   }
@@ -330,11 +346,16 @@ async function memorySearch(db: MemoryDatabase, args: Record<string, unknown>): 
     return text(`No memories found matching "${query}".`);
   }
 
-  const formatted = scored.map((row) => formatScoredMemory(rowToMemory(row), row.score)).join('\n---\n');
+  // Rerank with cross-encoder, then slice to final limit
+  const { results, reranked } = await rerankResults(query, scored, limit);
 
-  const searchMode = queryEmbedding ? 'hybrid (text + semantic)' : 'text-only';
+  const formatted = results.map((row) => formatScoredMemory(rowToMemory(row), row.score, row.textScore)).join('\n---\n');
+
+  const searchMode = queryEmbedding
+    ? reranked ? 'hybrid (text + semantic + reranked)' : 'hybrid (text + semantic)'
+    : 'text-only';
   return text(
-    `Found ${scored.length} memor${scored.length === 1 ? 'y' : 'ies'} matching "${query}" [${searchMode}]:\n\n${formatted}`,
+    `Found ${results.length} memor${results.length === 1 ? 'y' : 'ies'} matching "${query}" [${searchMode}]:\n\n${formatted}`,
   );
 }
 
@@ -648,6 +669,7 @@ function memoryGraph(db: MemoryDatabase, args: Record<string, unknown>): ToolRes
 async function memoryHealth(db: MemoryDatabase): Promise<ToolResult> {
   const stats = db.getHealthStats();
   const embAvailable = await isEmbeddingsAvailable();
+  const rerankerAvailable = await isRerankerAvailable();
 
   let fileSize = 'unknown';
   try {
@@ -666,6 +688,7 @@ async function memoryHealth(db: MemoryDatabase): Promise<ToolResult> {
 
 **Database:** ${fileSize}
 **Embeddings model:** ${embAvailable ? 'available' : 'unavailable'}
+**Reranker model:** ${rerankerAvailable ? 'available' : 'unavailable'}
 
 ## Counts
 - **Total:** ${stats.total}
@@ -703,10 +726,11 @@ ${m.context ? `**Context:** ${m.context}\n` : ''}
 ${m.content}`;
 }
 
-function formatScoredMemory(m: Memory, score: number): string {
+function formatScoredMemory(m: Memory, score: number, textScore?: number): string {
   const titleLine = m.title ? ` — ${m.title}` : '';
   const sourceLine = m.source ? ` | **Source:** ${m.source}` : '';
-  return `**[${m.type}]** ${m.id}${titleLine} — score: ${score.toFixed(3)}
+  const scoreInfo = textScore !== undefined ? `score: ${score.toFixed(3)} (text: ${textScore.toFixed(3)})` : `score: ${score.toFixed(3)}`;
+  return `**[${m.type}]** ${m.id}${titleLine} — ${scoreInfo}
 **Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Created:** ${m.created_at.slice(0, 10)}
 **Tags:** ${m.tags.length > 0 ? m.tags.join(', ') : '(none)'}${sourceLine}
 ${m.context ? `**Context:** ${m.context}\n` : ''}
