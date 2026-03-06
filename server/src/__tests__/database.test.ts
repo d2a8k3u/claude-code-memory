@@ -654,6 +654,241 @@ describe('MemoryDatabase - hybrid search scoring', () => {
 });
 
 // ==========================================================
+// Relevance filtering
+// ==========================================================
+describe('MemoryDatabase - relevance filtering', () => {
+  it('Stage 1 filters noise below topic threshold', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'relevant',
+        content: 'machine learning neural networks deep learning',
+        importance: 0.5,
+      }),
+    );
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'noise',
+        content: 'unrelated cooking recipe pasta tomato',
+        importance: 0.9,
+      }),
+    );
+
+    const results = db.hybridSearchMemories('machine learning', null, 10, {
+      topicThreshold: 0.05,
+    });
+    const ids = results.map((r) => r.id);
+    assert.ok(ids.includes('relevant'), 'Should include relevant match');
+    assert.ok(!ids.includes('noise'), 'Should exclude noise despite high importance');
+    cleanup(db, dir);
+  });
+
+  it('Stage 1 preserves strong matches with strict threshold', () => {
+    const { db, dir } = makeTempDb();
+    // Need multiple documents so BM25 IDF is meaningful (single-doc = 100% DF = near-zero IDF)
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'strong',
+        content: 'machine learning algorithms neural networks training optimization',
+        importance: 0.5,
+      }),
+    );
+    db.insertMemory(makeMemoryRow({ id: 'other1', content: 'cooking recipe pasta tomato sauce' }));
+    db.insertMemory(makeMemoryRow({ id: 'other2', content: 'gardening plants watering soil' }));
+    db.insertMemory(makeMemoryRow({ id: 'other3', content: 'music guitar chords practice' }));
+
+    // With good IDF (1/4 docs match), textScore should be well above the floor
+    const unfiltered = db.hybridSearchMemories('machine learning', null, 10, { topicThreshold: 0 });
+    assert.ok(unfiltered.length >= 1);
+    assert.ok(
+      unfiltered[0].textScore > 0.05,
+      `Good IDF match should produce textScore above floor, got ${unfiltered[0].textScore}`,
+    );
+
+    // A threshold above the floor but below the actual score should preserve the result
+    const results = db.hybridSearchMemories('machine learning', null, 10, {
+      topicThreshold: unfiltered[0].textScore - 0.01,
+    });
+    assert.ok(results.length >= 1, 'Strong match should pass threshold below its textScore');
+    assert.equal(results[0].id, 'strong');
+    cleanup(db, dir);
+  });
+
+  it('Stage 2 filters marginal composite scores', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'old-marginal',
+        content: 'machine learning basics',
+        importance: 0.1,
+        access_count: 0,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'recent-strong',
+        content: 'machine learning algorithms deep learning',
+        importance: 0.8,
+      }),
+    );
+
+    const results = db.hybridSearchMemories('machine learning', null, 10, {
+      topicThreshold: 0.01,
+      relevanceThreshold: 0.25,
+    });
+    const ids = results.map((r) => r.id);
+    assert.ok(ids.includes('recent-strong'), 'Strong recent match should pass');
+    // old-marginal: textScore ~0.05 (floor) → finalScore = 0.05*0.5 + 0.1*0.2 + ~0*0.2 + 0*0.1 ≈ 0.045
+    // Should be filtered by relevanceThreshold 0.25
+    assert.ok(!ids.includes('old-marginal'), 'Old marginal match should be filtered');
+    cleanup(db, dir);
+  });
+
+  it('default filter is backward-compatible', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'm1',
+        content: 'searchable keyword unique',
+        importance: 0.5,
+      }),
+    );
+
+    // Without filter arg (default topicThreshold 0.05)
+    const noFilter = db.hybridSearchMemories('searchable keyword', null, 10);
+    // With explicit default filter
+    const withDefault = db.hybridSearchMemories('searchable keyword', null, 10, {
+      topicThreshold: 0.05,
+    });
+
+    assert.equal(noFilter.length, withDefault.length);
+    if (noFilter.length > 0 && withDefault.length > 0) {
+      assert.equal(noFilter[0].id, withDefault[0].id);
+    }
+    cleanup(db, dir);
+  });
+
+  it('auto-boost is not applied to filtered-out results', () => {
+    const { db, dir } = makeTempDb();
+
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'noise',
+        content: 'unrelated cooking recipe pasta sauce',
+        importance: 0.5,
+      }),
+    );
+    // Give noise a very different embedding from the query
+    db.updateMemoryEmbedding('noise', makeEmbedding(999));
+
+    // Search with a different embedding — vec similarity will be low, FTS won't match
+    db.hybridSearchMemories('machine learning', makeEmbedding(1), 10, { topicThreshold: 0.05 });
+
+    const row = db.getMemoryByIdRaw('noise');
+    assert.ok(row);
+    assert.equal(row.importance, 0.5, 'Importance should not change for filtered-out results');
+    cleanup(db, dir);
+  });
+
+  it('FTS-only fallback respects topic gate', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'relevant',
+        content: 'typescript compiler strict mode configuration',
+        importance: 0.5,
+      }),
+    );
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'noise',
+        content: 'python flask web framework routing',
+        importance: 0.9,
+      }),
+    );
+
+    // FTS-only, threshold below FTS_MATCH_FLOOR — FTS matches pass
+    const results = db.hybridSearchMemories('typescript compiler', null, 10, {
+      topicThreshold: 0.05,
+    });
+    const ids = results.map((r) => r.id);
+    assert.ok(ids.includes('relevant'));
+    assert.ok(!ids.includes('noise'), 'Non-matching content should not appear');
+    cleanup(db, dir);
+  });
+
+  it('textScore field is populated on returned results', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'm1',
+        content: 'database query optimization indexes',
+        importance: 0.5,
+      }),
+    );
+
+    const results = db.hybridSearchMemories('database query', null, 10);
+    assert.ok(results.length >= 1);
+    assert.ok(typeof results[0].textScore === 'number', 'textScore should be a number');
+    assert.ok(results[0].textScore >= 0.05, 'textScore should be at least FTS_MATCH_FLOOR for FTS matches');
+    assert.ok(results[0].textScore <= 1, 'textScore should be <= 1');
+    cleanup(db, dir);
+  });
+
+  it('both filters compose correctly', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Strong match, recent
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'strong-recent',
+        content: 'database query optimization performance tuning indexes',
+        importance: 0.8,
+      }),
+    );
+    // Noise (FTS won't match)
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'noise',
+        content: 'cooking recipe pasta sauce',
+        importance: 0.9,
+      }),
+    );
+    // Weak match, old, low importance — passes Stage 1 (FTS matches) but fails Stage 2
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'weak-old',
+        content: 'database',
+        importance: 0.1,
+        access_count: 0,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+
+    const results = db.hybridSearchMemories('database query optimization', null, 10, {
+      topicThreshold: 0.05,
+      relevanceThreshold: 0.25,
+    });
+    const ids = results.map((r) => r.id);
+    assert.ok(ids.includes('strong-recent'), 'Strong recent match passes both filters');
+    assert.ok(!ids.includes('noise'), 'Noise filtered by Stage 1 (no FTS match)');
+    // weak-old: textScore ~0.05 (floor), finalScore ~0.045 → filtered by relevanceThreshold 0.25
+    assert.ok(!ids.includes('weak-old'), 'Weak old match filtered by Stage 2');
+    for (const r of results) {
+      assert.ok(r.textScore >= 0.05, `textScore ${r.textScore} should meet topic threshold`);
+      assert.ok(r.score >= 0.25, `score ${r.score} should meet relevance threshold`);
+    }
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
 // Cleanup working memories by age
 // ==========================================================
 describe('MemoryDatabase - cleanupWorkingMemories', () => {

@@ -175,6 +175,103 @@ describe('handleMemoryTool - memory_search', () => {
 });
 
 // ==========================================================
+// memory_search strictness
+// ==========================================================
+describe('handleMemoryTool - memory_search strictness', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'strong',
+        type: 'semantic',
+        content: 'typescript compiler strict mode configuration options',
+        importance: 0.8,
+      }),
+    );
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'noise',
+        type: 'semantic',
+        content: 'cooking recipe pasta sauce tomato basil',
+        importance: 0.9,
+      }),
+    );
+  });
+
+  it('default strictness is normal', async () => {
+    const result = await handleMemoryTool(db, 'memory_search', {
+      query: 'typescript compiler',
+    });
+    const text = getText(result);
+    assert.ok(text.includes('strong'));
+    assert.ok(text.includes('text:'), 'Should include textScore in output');
+    cleanup(db, dir);
+  });
+
+  it('high strictness returns fewer results than low for boundary matches', async () => {
+    const highResult = await handleMemoryTool(db, 'memory_search', {
+      query: 'typescript compiler',
+      strictness: 'high',
+    });
+    const lowResult = await handleMemoryTool(db, 'memory_search', {
+      query: 'typescript compiler',
+      strictness: 'low',
+    });
+
+    const highText = getText(highResult);
+    const lowText = getText(lowResult);
+
+    // Neither should include noise (FTS doesn't match unrelated content)
+    assert.ok(!highText.includes('cooking'));
+    assert.ok(!lowText.includes('cooking'));
+    // Low should be at least as permissive as high
+    const highCount = (highText.match(/\[semantic\]/g) ?? []).length;
+    const lowCount = (lowText.match(/\[semantic\]/g) ?? []).length;
+    assert.ok(lowCount >= highCount, `low (${lowCount}) should return >= high (${highCount})`);
+
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// memory_search reranking
+// ==========================================================
+describe('handleMemoryTool - memory_search reranking', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'r1',
+        type: 'semantic',
+        content: 'TypeScript compiler configuration with strict mode',
+        importance: 0.8,
+      }),
+    );
+  });
+
+  it('search mode includes reranked or falls back gracefully', async () => {
+    const result = await handleMemoryTool(db, 'memory_search', {
+      query: 'typescript',
+    });
+    const text = getText(result);
+    // Should include one of the search modes (reranked if model available, otherwise hybrid or text-only)
+    assert.ok(
+      text.includes('hybrid (text + semantic + reranked)') ||
+        text.includes('hybrid (text + semantic)') ||
+        text.includes('text-only'),
+      'Should display a valid search mode',
+    );
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
 // memory_list
 // ==========================================================
 describe('handleMemoryTool - memory_list', () => {
