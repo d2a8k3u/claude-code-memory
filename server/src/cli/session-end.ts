@@ -1,9 +1,10 @@
 import type { MemoryDatabase } from '../database.js';
-import type { MemoryRow } from '../types.js';
-import { generateEmbeddings, embeddingToBuffer, cosineSimilarity, bufferToEmbedding } from '../embeddings.js';
+import type { MemoryRow, MemoryType } from '../types.js';
+import { generateEmbedding, generateEmbeddings, embeddingToBuffer, cosineSimilarity, bufferToEmbedding } from '../embeddings.js';
 import type { HookInput, HookOutput } from './types.js';
 import { parseTranscript, type BashCategory } from './transcript.js';
 import { makeMemoryRecord, derivePatternTitle } from './shared.js';
+import { safeParseTags } from '../merge-utils.js';
 
 export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Promise<HookOutput> {
   const cwd = input.cwd ?? process.cwd();
@@ -13,7 +14,8 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
   const embeddingTexts: string[] = [];
 
   const mainParts: string[] = [];
-  if (summary.taskSummary) mainParts.push(`**Task:** ${summary.taskSummary}`);
+  const taskSummary = summary.taskSummary ?? '';
+  if (taskSummary) mainParts.push(`**Task:** ${taskSummary}`);
   if (summary.toolsUsed.length > 0) mainParts.push(`**Tools:** ${summary.toolsUsed.join(', ')}`);
   if (summary.memorySearches > 0 || summary.memoryStores > 0) {
     mainParts.push(`**Memory ops:** ${summary.memorySearches} searches, ${summary.memoryStores} stores`);
@@ -23,7 +25,15 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
     return { ok: true };
   }
 
-  if (mainParts.length > 0) {
+  // Step 2: Filter meaningless episodic records
+  const isMeaningless =
+    taskSummary.length < 15 || taskSummary.startsWith('[Request interrupted');
+  const hasSubstance =
+    summary.toolsUsed.length > 0 ||
+    summary.memorySearches > 0 ||
+    summary.memoryStores > 0;
+
+  if (mainParts.length > 0 && !(isMeaningless && !hasSubstance)) {
     const mainContent = mainParts.join('\n');
     episodicRecords.push(makeMemoryRecord('episodic', mainContent, ['auto-save', 'session-end']));
     embeddingTexts.push(mainContent);
@@ -36,53 +46,44 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
   }
 
   if (summary.errorCount > 0) {
-    const taskContext = summary.taskSummary ? ` during: ${summary.taskSummary}` : '';
+    const taskContext = taskSummary ? ` during: ${taskSummary}` : '';
     const errorsContent = `**Errors encountered:** ${summary.errorCount} errors during session${taskContext}`;
     episodicRecords.push(makeMemoryRecord('episodic', errorsContent, ['auto-save', 'session-errors']));
     embeddingTexts.push(errorsContent);
   }
 
-  const proceduralRecords: (MemoryRow & { embedding?: Buffer | null })[] = [];
+  // Handle singleton records by tag-based lookup (one per category, updated in place)
   const successfulByCategory = groupSuccessfulCommands(summary.bashCommands);
 
   for (const [category, commands] of successfulByCategory) {
     if (commands.length < 2) continue;
     const content = `${categoryLabel(category)} workflow: ${commands.join(' && ')}`;
-    proceduralRecords.push(
-      makeMemoryRecord('procedural', content, ['auto-procedural', category], {
-        title: `${categoryLabel(category)} workflow`,
-        context: 'session-end auto-save',
-      }),
-    );
-    embeddingTexts.push(content);
+    await updateOrCreateProcedural(db, content, category);
   }
 
-  const semanticRecords: (MemoryRow & { embedding?: Buffer | null })[] = [];
-
   if (summary.technologies.length > 0) {
-    const techContent = `Technology stack used: ${summary.technologies.join(', ')}`;
-    semanticRecords.push(
-      makeMemoryRecord('semantic', techContent, ['auto-semantic', 'tech-stack'], {
-        title: 'Technology stack',
-        context: 'session-end auto-save',
-      }),
+    await mergeOrCreateSemantic(
+      db,
+      `Technology stack used: ${summary.technologies.join(', ')}`,
+      ['auto-semantic', 'tech-stack'],
+      'Technology stack',
+      'tech-stack',
     );
-    embeddingTexts.push(techContent);
   }
 
   const activeModules = extractActiveModules(summary.filesModified);
   if (activeModules.length > 0) {
-    const moduleContent = `Active modules/directories: ${activeModules.join(', ')}`;
-    semanticRecords.push(
-      makeMemoryRecord('semantic', moduleContent, ['auto-semantic', 'active-modules'], {
-        title: 'Active modules',
-        context: 'session-end auto-save',
-      }),
+    await mergeOrCreateSemantic(
+      db,
+      `Active modules/directories: ${activeModules.join(', ')}`,
+      ['auto-semantic', 'active-modules'],
+      'Active modules',
+      'active-modules',
     );
-    embeddingTexts.push(moduleContent);
   }
 
-  const allRecords = [...episodicRecords, ...proceduralRecords, ...semanticRecords];
+  // Batch-process episodic records
+  const allRecords = [...episodicRecords];
   const embeddings = await generateEmbeddings(embeddingTexts);
 
   for (let i = 0; i < allRecords.length; i++) {
@@ -96,8 +97,8 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
     const record = allRecords[i];
     const emb = embeddings[i];
 
-    if (record.type !== 'episodic' && emb) {
-      const similar = db.findSimilarMemory(emb, 0.05);
+    if (emb) {
+      const similar = db.findSimilarMemory(emb, 0.10, record.type as MemoryType);
       if (similar) continue;
     }
 
@@ -109,6 +110,75 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
   return { ok: true };
 }
 
+export function parseListContent(content: string): string[] {
+  const colonIdx = content.indexOf(':');
+  if (colonIdx === -1) return [];
+  return content
+    .slice(colonIdx + 1)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function mergeOrCreateSemantic(
+  db: MemoryDatabase,
+  content: string,
+  tags: string[],
+  title: string,
+  matchTag: string,
+): Promise<void> {
+  const existing = db.findMemoryByTag('semantic', matchTag);
+  if (existing) {
+    const existingItems = parseListContent(existing.content);
+    const incomingItems = parseListContent(content);
+    const merged = [...new Set([...existingItems, ...incomingItems])].sort();
+
+    const prefix = content.slice(0, content.indexOf(':') + 1);
+    const mergedContent = `${prefix} ${merged.join(', ')}`;
+
+    db.updateMemory(existing.id, { content: mergedContent });
+
+    const newEmb = await generateEmbedding(mergedContent);
+    if (newEmb) {
+      db.updateMemoryEmbedding(existing.id, newEmb);
+    }
+    return;
+  }
+
+  const emb = await generateEmbedding(content);
+  const record = makeMemoryRecord('semantic', content, tags, { title, context: 'session-end auto-save' });
+  if (emb) {
+    record.embedding = embeddingToBuffer(emb);
+  }
+  db.insertMemory(record);
+}
+
+async function updateOrCreateProcedural(
+  db: MemoryDatabase,
+  content: string,
+  category: BashCategory,
+): Promise<void> {
+  const existing = db.findMemoryByTag('procedural', category);
+  if (existing) {
+    db.updateMemory(existing.id, { content });
+    const newEmb = await generateEmbedding(content);
+    if (newEmb) {
+      db.updateMemoryEmbedding(existing.id, newEmb);
+    }
+    return;
+  }
+
+  const emb = await generateEmbedding(content);
+  const record = makeMemoryRecord('procedural', content, ['auto-procedural', category], {
+    title: `${categoryLabel(category)} workflow`,
+    context: 'session-end auto-save',
+  });
+  if (emb) {
+    record.embedding = embeddingToBuffer(emb);
+  }
+  db.insertMemory(record);
+}
+
 function groupSuccessfulCommands(
   commands: { command: string; success: boolean; category: BashCategory }[],
 ): Map<BashCategory, string[]> {
@@ -116,7 +186,9 @@ function groupSuccessfulCommands(
   for (const cmd of commands) {
     if (!cmd.success || cmd.category === 'other' || cmd.category === 'git') continue;
     const list = grouped.get(cmd.category) ?? [];
-    list.push(cmd.command);
+    if (!list.includes(cmd.command)) {
+      list.push(cmd.command);
+    }
     grouped.set(cmd.category, list);
   }
   return grouped;
@@ -152,26 +224,37 @@ function extractActiveModules(filesModified: string[]): string[] {
     .map(([dir]) => dir);
 }
 
+function extractTaskFromEpisodic(content: string): string {
+  const taskMatch = content.match(/\*\*Task:\*\*\s*(.+?)(?:\n|$)/);
+  return taskMatch ? taskMatch[1].trim() : content.slice(0, 100);
+}
+
 async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
   const recentEpisodics = db.getRecentEpisodicWithEmbeddings(30, 50);
-  if (recentEpisodics.length < 3) return;
+
+  const clusterCandidates = recentEpisodics.filter((mem) => {
+    const tags = safeParseTags(mem.tags);
+    if (!tags.includes('session-end')) return false;
+    if (mem.content.includes('[Request interrupted')) return false;
+    return true;
+  });
+  if (clusterCandidates.length < 3) return;
 
   const existingPatterns = db.getMemoriesByTypeWithEmbeddings('pattern', 20);
 
   const clusters: number[][] = [];
   const assigned = new Set<number>();
 
-  for (let i = 0; i < recentEpisodics.length; i++) {
+  for (let i = 0; i < clusterCandidates.length; i++) {
     if (assigned.has(i)) continue;
     const cluster = [i];
     assigned.add(i);
 
-    const embI = bufferToEmbedding(recentEpisodics[i].embedding);
-    for (let j = i + 1; j < recentEpisodics.length; j++) {
+    const embI = bufferToEmbedding(clusterCandidates[i].embedding);
+    for (let j = i + 1; j < clusterCandidates.length; j++) {
       if (assigned.has(j)) continue;
-      const embJ = bufferToEmbedding(recentEpisodics[j].embedding);
+      const embJ = bufferToEmbedding(clusterCandidates[j].embedding);
       const similarity = cosineSimilarity(embI, embJ);
-      // MiniLM-L6-v2 produces ~0.40-0.65 for related sentences, >0.95 for near-duplicates
       if (similarity >= 0.4 && similarity <= 0.95) {
         cluster.push(j);
         assigned.add(j);
@@ -190,12 +273,11 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
 
   for (let ci = 0; ci < clusters.length; ci++) {
     const cluster = clusters[ci];
-    const memberTexts = cluster.map((idx) => recentEpisodics[idx].content);
 
     const dim = 384;
     const centroid = new Float32Array(dim);
     for (const idx of cluster) {
-      const emb = bufferToEmbedding(recentEpisodics[idx].embedding);
+      const emb = bufferToEmbedding(clusterCandidates[idx].embedding);
       for (let d = 0; d < dim; d++) centroid[d] += emb[d];
     }
     for (let d = 0; d < dim; d++) centroid[d] /= cluster.length;
@@ -215,12 +297,15 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
     }
     if (covered) continue;
 
-    const title = derivePatternTitle(memberTexts);
-    const content = `Recurring theme across ${cluster.length} sessions: ${memberTexts.join(' | ')}`;
+    const taskDescriptions = cluster
+      .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
+      .filter((t) => t.length > 0);
+    const title = derivePatternTitle(taskDescriptions);
+    const content = `Recurring theme across ${cluster.length} sessions: ${taskDescriptions.join(' | ')}`;
 
     patternTexts.push(`${title}: ${content}`);
     patternData.push({
-      memberIds: cluster.map((idx) => recentEpisodics[idx].id),
+      memberIds: cluster.map((idx) => clusterCandidates[idx].id),
       clusterIdx: ci,
     });
   }
@@ -236,9 +321,13 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
     const similar = db.findSimilarMemory(emb, 0.05);
     if (similar) continue;
 
-    const title = derivePatternTitle(
-      patternData[i].memberIds.map((id) => recentEpisodics.find((e) => e.id === id)?.content ?? ''),
-    );
+    const taskDescriptions = patternData[i].memberIds
+      .map((id) => {
+        const mem = clusterCandidates.find((e) => e.id === id);
+        return mem ? extractTaskFromEpisodic(mem.content) : '';
+      })
+      .filter((t) => t.length > 0);
+    const title = derivePatternTitle(taskDescriptions);
     const content = patternTexts[i].slice(patternTexts[i].indexOf(':') + 2);
 
     const record = makeMemoryRecord('pattern', content, ['auto-pattern'], {
