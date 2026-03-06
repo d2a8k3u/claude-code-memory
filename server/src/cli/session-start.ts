@@ -1,4 +1,4 @@
-import type { MemoryDatabase, ScoredMemoryRow } from '../database.js';
+import type { MemoryDatabase, ScoredMemoryRow, RelevanceFilterOptions } from '../database.js';
 import type { MemoryRow } from '../types.js';
 import {
   generateEmbeddings,
@@ -7,6 +7,7 @@ import {
   bufferToEmbedding,
   cosineSimilarity,
 } from '../embeddings.js';
+import { warmRerankerModel } from '../reranker.js';
 import type { HookInput, HookOutput } from './types.js';
 import { extractGitSignals } from './git-signals.js';
 import { makeMemoryRecord, derivePatternTitle } from './shared.js';
@@ -22,6 +23,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   const cwd = input.cwd ?? process.cwd();
 
   warmEmbeddingModel();
+  warmRerankerModel();
 
   const signals = extractGitSignals(cwd);
   const workingCleaned = db.deleteAllWorkingMemories();
@@ -65,6 +67,8 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
       : embeddings[embeddings.length - 1]
     : null;
 
+  const sessionFilter: RelevanceFilterOptions = { topicThreshold: 0.08, relevanceThreshold: 0.15 };
+
   const sections: string[] = [];
   const seenIds = new Set<string>();
 
@@ -74,7 +78,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     for (let i = 0; i < channels.length; i++) {
       const channel = channels[i];
       const embedding = channelEmbeddings[i] ?? null;
-      const results = db.hybridSearchMemories(channel.query, embedding, 10);
+      const results = db.hybridSearchMemories(channel.query, embedding, 10, sessionFilter);
 
       for (const result of results) {
         const weightedScore = channel.weight * result.score;
@@ -106,7 +110,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   if (overviewQuery && overviewEmbedding) {
     const semanticResults = db
-      .hybridSearchMemories(overviewQuery, overviewEmbedding, 20)
+      .hybridSearchMemories(overviewQuery, overviewEmbedding, 20, sessionFilter)
       .filter((r) => r.type === 'semantic')
       .slice(0, 5);
     appendSection(sections, seenIds, semanticResults, '\n## Key Knowledge', (mem) => {
@@ -129,7 +133,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   if (overviewQuery && overviewEmbedding) {
     const procedureResults = db
-      .hybridSearchMemories(overviewQuery, overviewEmbedding, 15)
+      .hybridSearchMemories(overviewQuery, overviewEmbedding, 15, sessionFilter)
       .filter((r) => r.type === 'procedural')
       .slice(0, 3);
     appendSection(sections, seenIds, procedureResults, '\n## Procedures', (mem) => {
@@ -200,7 +204,7 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
   }
   if (totalMerged > 0) actions.push(`${totalMerged} duplicates merged`);
 
-  const splittableTypes = ['semantic', 'procedural', 'pattern'] as const;
+  const splittableTypes = ['semantic', 'procedural'] as const;
   const MAX_SPLITS_PER_CONSOLIDATION = 5;
   let totalSplit = 0;
   const consumedIds = new Set<string>();
@@ -261,20 +265,27 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
   let patternsCreated = 0;
   const recentEpisodics = db.getRecentEpisodicWithEmbeddings(30, 50);
 
-  if (recentEpisodics.length >= 3) {
+  const clusterCandidates = recentEpisodics.filter((mem) => {
+    const tags = safeParseTags(mem.tags);
+    if (!tags.includes('session-end')) return false;
+    if (mem.content.includes('[Request interrupted')) return false;
+    return true;
+  });
+
+  if (clusterCandidates.length >= 3) {
     const existingPatterns = db.getMemoriesByTypeWithEmbeddings('pattern', 20);
     const clusters: number[][] = [];
     const assigned = new Set<number>();
 
-    for (let i = 0; i < recentEpisodics.length; i++) {
+    for (let i = 0; i < clusterCandidates.length; i++) {
       if (assigned.has(i)) continue;
       const cluster = [i];
       assigned.add(i);
 
-      const embI = bufferToEmbedding(recentEpisodics[i].embedding);
-      for (let j = i + 1; j < recentEpisodics.length; j++) {
+      const embI = bufferToEmbedding(clusterCandidates[i].embedding);
+      for (let j = i + 1; j < clusterCandidates.length; j++) {
         if (assigned.has(j)) continue;
-        const embJ = bufferToEmbedding(recentEpisodics[j].embedding);
+        const embJ = bufferToEmbedding(clusterCandidates[j].embedding);
         const similarity = cosineSimilarity(embI, embJ);
         if (similarity >= 0.4 && similarity <= 0.95) {
           cluster.push(j);
@@ -289,12 +300,10 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
     const patternClusters: number[][] = [];
 
     for (const cluster of clusters) {
-      const memberTexts = cluster.map((idx) => recentEpisodics[idx].content);
-
       const dim = 384;
       const centroid = new Float32Array(dim);
       for (const idx of cluster) {
-        const emb = bufferToEmbedding(recentEpisodics[idx].embedding);
+        const emb = bufferToEmbedding(clusterCandidates[idx].embedding);
         for (let d = 0; d < dim; d++) centroid[d] += emb[d];
       }
       for (let d = 0; d < dim; d++) centroid[d] /= cluster.length;
@@ -313,8 +322,11 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
       }
       if (covered) continue;
 
-      const title = derivePatternTitle(memberTexts);
-      const content = `Recurring theme across ${cluster.length} sessions: ${memberTexts.join(' | ')}`;
+      const taskDescriptions = cluster
+        .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
+        .filter((t) => t.length > 0);
+      const title = derivePatternTitle(taskDescriptions);
+      const content = `Recurring theme across ${cluster.length} sessions: ${taskDescriptions.join(' | ')}`;
       patternTexts.push(`${title}: ${content}`);
       patternClusters.push(cluster);
     }
@@ -330,8 +342,10 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
         if (similar) continue;
 
         const cluster = patternClusters[i];
-        const memberTexts = cluster.map((idx) => recentEpisodics[idx].content);
-        const title = derivePatternTitle(memberTexts);
+        const taskDescriptions = cluster
+          .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
+          .filter((t) => t.length > 0);
+        const title = derivePatternTitle(taskDescriptions);
         const content = patternTexts[i].slice(patternTexts[i].indexOf(':') + 2);
 
         const record = makeMemoryRecord('pattern', content, ['auto-pattern'], {
@@ -344,7 +358,7 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
 
         for (const idx of cluster) {
           try {
-            db.addRelation(record.id, recentEpisodics[idx].id, 'derived_from', 0.7);
+            db.addRelation(record.id, clusterCandidates[idx].id, 'derived_from', 0.7);
           } catch {
             // Not critical
           }
@@ -359,6 +373,11 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
   if (staleDeleted > 0) actions.push(`${staleDeleted} stale deleted`);
 
   return actions.join(', ');
+}
+
+function extractTaskFromEpisodic(content: string): string {
+  const taskMatch = content.match(/\*\*Task:\*\*\s*(.+?)(?:\n|$)/);
+  return taskMatch ? taskMatch[1].trim() : content.slice(0, 100);
 }
 
 function appendSection(
