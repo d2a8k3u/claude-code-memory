@@ -1,12 +1,17 @@
 import type { MemoryDatabase } from '../database.js';
-import type { MemoryType } from '../types.js';
+import type { MemoryRow, MemoryType } from '../types.js';
+import { generateEmbedding } from '../embeddings.js';
 import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
 import { safeParseTags } from '../merge-utils.js';
+import { parseListContent } from './session-end.js';
 import type { HookInput, HookOutput } from './types.js';
 
 const BATCH_SIZE = 50;
+const ACCUMULATIVE_TAGS = ['tech-stack', 'active-modules'];
 
 export async function handleReorganize(db: MemoryDatabase, _input: HookInput): Promise<HookOutput> {
+  const deduped = await deduplicateAccumulativeRecords(db);
+
   const types: MemoryType[] = ['semantic', 'procedural', 'pattern'];
 
   let totalProcessed = 0;
@@ -85,6 +90,7 @@ export async function handleReorganize(db: MemoryDatabase, _input: HookInput): P
   const report = [
     '# Memory Reorganization Report',
     '',
+    `- **Deduplicated:** ${deduped} accumulative records merged`,
     `- **Processed:** ${totalProcessed} memories`,
     `- **Split:** ${totalSplit} memories decomposed by topic`,
     `- **Created:** ${totalCreated} new topic-specific memories`,
@@ -97,4 +103,51 @@ export async function handleReorganize(db: MemoryDatabase, _input: HookInput): P
   process.stderr.write(report + '\n');
 
   return { ok: true };
+}
+
+async function deduplicateAccumulativeRecords(db: MemoryDatabase): Promise<number> {
+  let totalDeduped = 0;
+
+  for (const tag of ACCUMULATIVE_TAGS) {
+    const all = db.listMemories('semantic', 200, 0);
+    const matches = all.filter((m) => safeParseTags(m.tags).includes(tag));
+    if (matches.length <= 1) continue;
+
+    const keep = pickBestRecord(matches);
+    const rest = matches.filter((m) => m.id !== keep.id);
+
+    const mergedItems = new Set<string>();
+    for (const m of matches) {
+      for (const item of parseListContent(m.content)) {
+        mergedItems.add(item);
+      }
+    }
+
+    const prefix = keep.content.slice(0, keep.content.indexOf(':') + 1);
+    const mergedContent = `${prefix} ${[...mergedItems].sort().join(', ')}`;
+
+    db.updateMemory(keep.id, { content: mergedContent });
+
+    const newEmb = await generateEmbedding(mergedContent);
+    if (newEmb) {
+      db.updateMemoryEmbedding(keep.id, newEmb);
+    }
+
+    for (const dup of rest) {
+      db.deleteMemory(dup.id);
+    }
+
+    totalDeduped += rest.length;
+  }
+
+  return totalDeduped;
+}
+
+function pickBestRecord(records: MemoryRow[]): MemoryRow {
+  return records.reduce((best, curr) => {
+    const bestLen = parseListContent(best.content).length;
+    const currLen = parseListContent(curr.content).length;
+    if (currLen !== bestLen) return currLen > bestLen ? curr : best;
+    return curr.importance > best.importance ? curr : best;
+  });
 }
