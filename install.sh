@@ -213,6 +213,7 @@ Auto-save covers routine facts. Use \`memory_store\` manually for insights autom
 - Corrections to auto-created memories
 
 ### Rules
+- **Always write memory content and titles in English**, even if the user communicates in another language. Translate if needed. This ensures consistent search and retrieval across sessions.
 - Search before storing to avoid duplicates
 - Be concise: 1-3 sentences per memory
 - Use lowercase hyphenated tags
