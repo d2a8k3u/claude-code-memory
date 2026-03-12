@@ -226,6 +226,50 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     cleanup(db, dir);
   });
 
+  it('includes relevance scores in Key Knowledge section', async () => {
+    seedMemory(
+      db,
+      'sem-score',
+      {
+        type: 'semantic',
+        title: 'Score Test',
+        content: 'Memory with visible score',
+        importance: 0.8,
+      },
+      1,
+    );
+
+    const result = await handleSessionStart(db, { cwd: '/a/bb' });
+    const ctx = result.hookSpecificOutput!.additionalContext;
+
+    assert.ok(ctx.includes('*(score:'), 'Key Knowledge should include relevance score');
+    assert.ok(/\*\(score: \d+\.\d{2}\)\*/.test(ctx), 'Score should be formatted as *(score: X.XX)*');
+    cleanup(db, dir);
+  });
+
+  it('does not include score in Recent Sessions section', async () => {
+    seedMemory(
+      db,
+      'ep-noscore',
+      {
+        type: 'episodic',
+        content: 'Session without score indicator',
+      },
+      1,
+    );
+
+    const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
+    const ctx = result.hookSpecificOutput!.additionalContext;
+
+    const recentIdx = ctx.indexOf('## Recent Sessions');
+    if (recentIdx >= 0) {
+      const nextSectionIdx = ctx.indexOf('\n##', recentIdx + 1);
+      const section = nextSectionIdx >= 0 ? ctx.slice(recentIdx, nextSectionIdx) : ctx.slice(recentIdx);
+      assert.ok(!section.includes('*(score:'), 'Recent Sessions should not include scores');
+    }
+    cleanup(db, dir);
+  });
+
   it('does not trigger consolidation before 10 sessions', async () => {
     db.setSessionMeta('session_count', '3');
     db.setSessionMeta('last_consolidation', '0');
