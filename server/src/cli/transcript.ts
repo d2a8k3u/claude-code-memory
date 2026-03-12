@@ -11,6 +11,7 @@ export interface BashCommand {
 export interface TranscriptSummary {
   taskSummary: string;
   toolsUsed: string[];
+  toolCallCount: number;
   filesModified: string[];
   filesRead: string[];
   errorCount: number;
@@ -84,6 +85,7 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
   const result: TranscriptSummary = {
     taskSummary: '',
     toolsUsed: [],
+    toolCallCount: 0,
     filesModified: [],
     filesRead: [],
     errorCount: 0,
@@ -144,6 +146,7 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
           const name = block.name;
           if (name && !READ_ONLY_TOOLS.has(name)) {
             toolsUsed.add(name);
+            result.toolCallCount++;
           }
 
           if (name === 'memory_search' || name === 'mcp__claude-memory__memory_search') {
