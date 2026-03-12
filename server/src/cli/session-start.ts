@@ -19,6 +19,74 @@ interface SearchChannel {
   weight: number;
 }
 
+export const CONTEXT_BUDGET = {
+  total: 25,
+  relevant: { min: 3, max: 15 },
+  episodic: { min: 1, max: 5 },
+  semantic: { min: 2, max: 8 },
+  pattern: { min: 1, max: 5 },
+  procedural: { min: 1, max: 5 },
+} as const;
+
+type SectionName = 'relevant' | 'episodic' | 'semantic' | 'pattern' | 'procedural';
+
+interface ContextCandidate {
+  memory: MemoryRow | ScoredMemoryRow;
+  quality: number;
+}
+
+interface ContextSection {
+  name: SectionName;
+  heading: string;
+  candidates: ContextCandidate[];
+  format: (mem: MemoryRow | ScoredMemoryRow, quality: number) => string;
+}
+
+export function allocateBudget(sections: ContextSection[]): {
+  allocated: Map<SectionName, ContextCandidate[]>;
+  seenIds: Set<string>;
+} {
+  const allocated = new Map<SectionName, ContextCandidate[]>();
+  const seenIds = new Set<string>();
+  let remaining = CONTEXT_BUDGET.total;
+
+  for (const section of sections) {
+    allocated.set(section.name, []);
+  }
+
+  for (const section of sections) {
+    const config = CONTEXT_BUDGET[section.name];
+    const items = allocated.get(section.name)!;
+    for (const candidate of section.candidates) {
+      if (items.length >= config.min || remaining <= 0) break;
+      if (seenIds.has(candidate.memory.id)) continue;
+      items.push(candidate);
+      seenIds.add(candidate.memory.id);
+      remaining--;
+    }
+  }
+
+  const pool: Array<{ section: SectionName; candidate: ContextCandidate }> = [];
+  for (const section of sections) {
+    for (const candidate of section.candidates) {
+      if (seenIds.has(candidate.memory.id)) continue;
+      pool.push({ section: section.name, candidate });
+    }
+  }
+  pool.sort((a, b) => b.candidate.quality - a.candidate.quality);
+
+  for (const { section, candidate } of pool) {
+    if (remaining <= 0) break;
+    const config = CONTEXT_BUDGET[section];
+    if (allocated.get(section)!.length >= config.max) continue;
+    allocated.get(section)!.push(candidate);
+    seenIds.add(candidate.memory.id);
+    remaining--;
+  }
+
+  return { allocated, seenIds };
+}
+
 export async function handleSessionStart(db: MemoryDatabase, input: HookInput): Promise<HookOutput> {
   const cwd = input.cwd ?? process.cwd();
 
@@ -36,8 +104,15 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   const channels: SearchChannel[] = [];
   if (signals.cwd.length > 0) channels.push({ query: signals.cwd.join(' '), weight: 1.0 });
   if (signals.branch.length > 0) channels.push({ query: signals.branch.join(' '), weight: 1.0 });
-  if (signals.commits.length > 0) channels.push({ query: signals.commits.slice(0, 8).join(' '), weight: 0.8 });
+  if (signals.commitMessages.length > 0) channels.push({ query: signals.commitMessages.join('. '), weight: 0.8 });
   if (signals.files.length > 0) channels.push({ query: signals.files.slice(0, 8).join(' '), weight: 0.8 });
+
+  const recentEp = db.getRecentByType('episodic', 1);
+  const prevTaskMatch = recentEp[0]?.content.match(/\*\*Task:\*\*\s*(.+?)(?:\n|$)/);
+  const prevTask = prevTaskMatch?.[1]?.trim();
+  if (prevTask && prevTask.length > 15 && !prevTask.startsWith('[Request interrupted')) {
+    channels.push({ query: prevTask, weight: 0.9 });
+  }
 
   const overviewTerms: string[] = [];
   if (signals.cwd.length > 0) overviewTerms.push(signals.cwd[0]);
@@ -69,9 +144,9 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   const sessionFilter: RelevanceFilterOptions = { topicThreshold: 0.08, relevanceThreshold: 0.15 };
 
-  const sections: string[] = [];
-  const seenIds = new Set<string>();
+  const contextSections: ContextSection[] = [];
 
+  const relevantCandidates: ContextCandidate[] = [];
   if (channels.length > 0) {
     const mergedScores = new Map<string, { memory: ScoredMemoryRow; bestScore: number }>();
 
@@ -89,63 +164,103 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
       }
     }
 
-    const ranked = [...mergedScores.values()].sort((a, b) => b.bestScore - a.bestScore).slice(0, 10);
+    const ranked = [...mergedScores.values()].sort((a, b) => b.bestScore - a.bestScore);
 
-    if (ranked.length > 0) {
-      sections.push('## Relevant to Current Work');
-      for (const { memory: mem } of ranked) {
-        seenIds.add(mem.id);
-        const titlePart = mem.title ? `**${mem.title}:** ` : '';
-        sections.push(`- [${mem.type}] ${titlePart}${mem.content}`);
-      }
+    for (const { memory, bestScore } of ranked) {
+      relevantCandidates.push({ memory, quality: bestScore });
     }
   }
 
-  const recentEpisodic = db.getRecentByType('episodic', 3);
-  appendSection(sections, seenIds, recentEpisodic, '\n## Recent Sessions', (mem) => {
-    const date = mem.created_at.slice(0, 10);
-    const ctx = mem.context ? ` (${mem.context})` : '';
-    return `- [${date}]${ctx} ${mem.content}`;
+  contextSections.push({
+    name: 'relevant',
+    heading: '## Relevant to Current Work',
+    candidates: relevantCandidates,
+    format: (mem, quality) => {
+      const titlePart = mem.title ? `**${mem.title}:** ` : '';
+
+      return `- [${mem.type}] ${titlePart}${mem.content} *(score: ${quality.toFixed(2)})*`;
+    },
   });
 
+  const recentEpisodic = db.getRecentByType('episodic', CONTEXT_BUDGET.episodic.max);
+  contextSections.push({
+    name: 'episodic',
+    heading: '## Recent Sessions',
+    candidates: recentEpisodic.map((mem, i) => ({
+      memory: mem,
+      quality: 0.7 - i * 0.1,
+    })),
+    format: (mem, _quality) => {
+      const date = mem.created_at.slice(0, 10);
+      const ctx = mem.context ? ` (${mem.context})` : '';
+      return `- [${date}]${ctx} ${mem.content}`;
+    },
+  });
+
+  const semanticCandidates: ContextCandidate[] = [];
+
   if (overviewQuery && overviewEmbedding) {
-    const semanticResults = db
+    const results = db
       .hybridSearchMemories(overviewQuery, overviewEmbedding, 20, sessionFilter)
-      .filter((r) => r.type === 'semantic')
-      .slice(0, 5);
-    appendSection(sections, seenIds, semanticResults, '\n## Key Knowledge', (mem) => {
-      const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content}`;
-    });
+      .filter((r) => r.type === 'semantic');
+    for (const r of results) semanticCandidates.push({ memory: r, quality: r.score });
   } else {
-    const semanticMems = db.getTopByImportance('semantic', 0.5, 5);
-    appendSection(sections, seenIds, semanticMems, '\n## Key Knowledge', (mem) => {
-      const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content}`;
-    });
+    const mems = db.getTopByImportance('semantic', 0.5, CONTEXT_BUDGET.semantic.max);
+    for (const m of mems) semanticCandidates.push({ memory: m, quality: m.importance });
   }
-
-  const patterns = db.getTopByImportance('pattern', 0, 5);
-  appendSection(sections, seenIds, patterns, '\n## Patterns & Conventions', (mem) => {
-    const title = mem.title ?? 'Untitled pattern';
-    return `- **${title}:** ${mem.content}`;
+  contextSections.push({
+    name: 'semantic',
+    heading: '## Key Knowledge',
+    candidates: semanticCandidates,
+    format: (mem, quality) => {
+      const titlePart = mem.title ? `**${mem.title}:** ` : '';
+      return `- ${titlePart}${mem.content} *(score: ${quality.toFixed(2)})*`;
+    },
   });
 
+  const patterns = db.getTopByImportance('pattern', 0, CONTEXT_BUDGET.pattern.max);
+  contextSections.push({
+    name: 'pattern',
+    heading: '## Patterns & Conventions',
+    candidates: patterns.map((m) => ({ memory: m, quality: m.importance })),
+    format: (mem, quality) => {
+      const title = mem.title ?? 'Untitled pattern';
+      return `- **${title}:** ${mem.content} *(score: ${quality.toFixed(2)})*`;
+    },
+  });
+
+  const proceduralCandidates: ContextCandidate[] = [];
   if (overviewQuery && overviewEmbedding) {
-    const procedureResults = db
+    const results = db
       .hybridSearchMemories(overviewQuery, overviewEmbedding, 15, sessionFilter)
-      .filter((r) => r.type === 'procedural')
-      .slice(0, 3);
-    appendSection(sections, seenIds, procedureResults, '\n## Procedures', (mem) => {
-      const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content}`;
-    });
+      .filter((r) => r.type === 'procedural');
+    for (const r of results) proceduralCandidates.push({ memory: r, quality: r.score });
   } else {
-    const procedures = db.getTopByImportance('procedural', 0.5, 3);
-    appendSection(sections, seenIds, procedures, '\n## Procedures', (mem) => {
+    const mems = db.getTopByImportance('procedural', 0.5, CONTEXT_BUDGET.procedural.max);
+    for (const m of mems) proceduralCandidates.push({ memory: m, quality: m.importance });
+  }
+  contextSections.push({
+    name: 'procedural',
+    heading: '## Procedures',
+    candidates: proceduralCandidates,
+    format: (mem, quality) => {
       const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content}`;
-    });
+      return `- ${titlePart}${mem.content} *(score: ${quality.toFixed(2)})*`;
+    },
+  });
+
+  const { allocated, seenIds } = allocateBudget(contextSections);
+
+  const sections: string[] = [];
+  let isFirstSection = true;
+  for (const section of contextSections) {
+    const items = allocated.get(section.name) ?? [];
+    if (items.length === 0) continue;
+    sections.push(isFirstSection ? section.heading : `\n${section.heading}`);
+    isFirstSection = false;
+    for (const item of items) {
+      sections.push(section.format(item.memory, item.quality));
+    }
   }
 
   const lastConsolidation = parseInt(db.getSessionMeta('last_consolidation') ?? '0', 10);
@@ -378,20 +493,4 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
 function extractTaskFromEpisodic(content: string): string {
   const taskMatch = content.match(/\*\*Task:\*\*\s*(.+?)(?:\n|$)/);
   return taskMatch ? taskMatch[1].trim() : content.slice(0, 100);
-}
-
-function appendSection(
-  sections: string[],
-  seenIds: Set<string>,
-  memories: (MemoryRow | ScoredMemoryRow)[],
-  heading: string,
-  format: (mem: MemoryRow) => string,
-): void {
-  const unseen = memories.filter((m) => !seenIds.has(m.id));
-  if (unseen.length === 0) return;
-  sections.push(heading);
-  for (const mem of unseen) {
-    seenIds.add(mem.id);
-    sections.push(format(mem));
-  }
 }
