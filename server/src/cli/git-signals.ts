@@ -14,9 +14,14 @@ export function extractGitSignals(cwd: string): GitSignals {
 
   const absPath = resolve(cwd);
   const segments = absPath.split('/').filter(Boolean);
-  signals.cwd = [...new Set(
-    segments.slice(-2).map((s) => s.toLowerCase()).filter((s) => s.length >= 3),
-  )];
+  signals.cwd = [
+    ...new Set(
+      segments
+        .slice(-2)
+        .map((s) => s.toLowerCase())
+        .filter((s) => s.length >= 3),
+    ),
+  ];
 
   try {
     const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd, timeout: 2000 }).toString().trim();
@@ -32,7 +37,8 @@ export function extractGitSignals(cwd: string): GitSignals {
   }
 
   const COMMIT_PREFIX_RE = /^(feat|fix|chore|docs|refactor|test|style|build|ci|perf|revert)(\([^)]*\))?[!]?:\s*/i;
-  const STOPWORDS = /^(the|and|for|with|from|that|this|have|been|add|update|remove|change|move|make|use|into|also|just|some|only|when|more|each|new|all|now|via|using|across|based)$/i;
+  const STOPWORDS =
+    /^(the|and|for|with|from|that|this|have|been|add|update|remove|change|move|make|use|into|also|just|some|only|when|more|each|new|all|now|via|using|across|based)$/i;
 
   try {
     const commits = execSync('git log --oneline -3 --no-decorate', { cwd, timeout: 2000 }).toString().trim();

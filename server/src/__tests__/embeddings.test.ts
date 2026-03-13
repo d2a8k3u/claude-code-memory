@@ -1,6 +1,14 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { cosineSimilarity, embeddingToBuffer, bufferToEmbedding, EMBEDDING_DIM, resetEmbeddingState, isEmbeddingsAvailable, generateEmbedding } from '../embeddings.js';
+import {
+  cosineSimilarity,
+  embeddingToBuffer,
+  bufferToEmbedding,
+  EMBEDDING_DIM,
+  resetEmbeddingState,
+  isEmbeddingsAvailable,
+  generateEmbedding,
+} from '../embeddings.js';
 
 describe('EMBEDDING_DIM', () => {
   it('is 384', () => {

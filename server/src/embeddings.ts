@@ -77,7 +77,9 @@ export async function generateEmbeddings(texts: string[]): Promise<(Float32Array
     const vectors = output.tolist();
     return vectors.map((v: number[]) => new Float32Array(v));
   } catch (err) {
-    console.warn(`[claude-memory] Batch embedding failed (${texts.length} texts): ${err instanceof Error ? err.message : String(err)}`);
+    console.warn(
+      `[claude-memory] Batch embedding failed (${texts.length} texts): ${err instanceof Error ? err.message : String(err)}`,
+    );
     return texts.map(() => null);
   }
 }

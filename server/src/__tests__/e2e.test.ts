@@ -239,8 +239,7 @@ describe('E2E: Deduplication / Auto-Merge', { timeout: 60_000 }, () => {
       title: 'TypeScript Type System',
     });
     const similarText = getText(similar);
-    assert.ok(similarText.includes('Merged with existing memory'),
-      `Expected merge, got: ${similarText}`);
+    assert.ok(similarText.includes('Merged with existing memory'), `Expected merge, got: ${similarText}`);
     assert.equal(db.countMemories(), 1);
   });
 });

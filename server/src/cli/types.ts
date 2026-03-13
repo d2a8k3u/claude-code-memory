@@ -3,7 +3,7 @@ export type HookInput = {
   transcript_path?: string;
   tool_name?: string;
   tool_output?: string;
-}
+};
 
 export type HookOutput = {
   hookSpecificOutput?: {
@@ -11,7 +11,7 @@ export type HookOutput = {
     additionalContext: string;
   };
   ok?: boolean;
-}
+};
 
 export function writeHookOutput(output: HookOutput): void {
   process.stdout.write(JSON.stringify(output));
