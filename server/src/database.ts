@@ -208,10 +208,7 @@ export class MemoryDatabase {
     const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as MemoryRow | undefined;
     if (!row) return null;
     this.db
-      .prepare(
-        `UPDATE memories SET access_count = access_count + 1, last_accessed = ?,
-         importance = MIN(0.95, importance + 0.01) WHERE id = ?`,
-      )
+      .prepare(`UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?`)
       .run(new Date().toISOString(), id);
     return row;
   }
@@ -342,13 +339,6 @@ export class MemoryDatabase {
 
     scored.sort((a, b) => b.score - a.score);
     const results = scored.slice(0, limit);
-
-    // Auto-boost: nudge importance for top search hits
-    for (const row of results) {
-      if (row.importance < 0.95) {
-        this.db.prepare('UPDATE memories SET importance = MIN(1.0, importance + 0.02) WHERE id = ?').run(row.id);
-      }
-    }
 
     return results;
   }
@@ -533,11 +523,11 @@ export class MemoryDatabase {
     return tx();
   }
 
-  decayImportance(daysThreshold: number, decayAmount: number): number {
+  decayImportance(daysThreshold: number, decayRate: number): number {
     const cutoff = new Date(Date.now() - daysThreshold * 24 * 60 * 60 * 1000).toISOString();
     const stmtFull = this.db.prepare(
       `UPDATE memories
-       SET importance = MAX(0.1, importance - ?)
+       SET importance = MAX(0.1, importance * (1 - ?))
        WHERE (last_accessed IS NULL OR last_accessed < ?)
          AND importance > 0.1
          AND type NOT IN ('working')
@@ -545,7 +535,7 @@ export class MemoryDatabase {
     );
     const stmtHalf = this.db.prepare(
       `UPDATE memories
-       SET importance = MAX(0.1, importance - ?)
+       SET importance = MAX(0.1, importance * (1 - ?))
        WHERE (last_accessed IS NULL OR last_accessed < ?)
          AND importance > 0.1
          AND type NOT IN ('working')
@@ -553,15 +543,15 @@ export class MemoryDatabase {
     );
     const stmtQuarter = this.db.prepare(
       `UPDATE memories
-       SET importance = MAX(0.1, importance - ?)
+       SET importance = MAX(0.1, importance * (1 - ?))
        WHERE (last_accessed IS NULL OR last_accessed < ?)
          AND importance > 0.1
          AND type NOT IN ('working')
          AND access_count > 10`,
     );
-    const r1 = stmtFull.run(decayAmount, cutoff);
-    const r2 = stmtHalf.run(decayAmount * 0.5, cutoff);
-    const r3 = stmtQuarter.run(decayAmount * 0.25, cutoff);
+    const r1 = stmtFull.run(decayRate, cutoff);
+    const r2 = stmtHalf.run(decayRate * 0.5, cutoff);
+    const r3 = stmtQuarter.run(decayRate * 0.25, cutoff);
     return r1.changes + r2.changes + r3.changes;
   }
 
