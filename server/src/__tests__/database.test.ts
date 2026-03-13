@@ -632,7 +632,7 @@ describe('MemoryDatabase - hybrid search scoring', () => {
     cleanup(db, dir);
   });
 
-  it('auto-boosts importance for top search hits', () => {
+  it('does not auto-boost importance for search hits', () => {
     const { db, dir } = makeTempDb();
     db.insertMemory(
       makeMemoryRow({
@@ -644,11 +644,10 @@ describe('MemoryDatabase - hybrid search scoring', () => {
 
     db.hybridSearchMemories('specific keyword', null, 10);
 
-    // Re-read without triggering access (use listMemories)
     const rows = db.listMemories(undefined, 20, 0);
     const m1 = rows.find((r) => r.id === 'm1');
     assert.ok(m1);
-    assert.ok(m1.importance > 0.5);
+    assert.equal(m1.importance, 0.5);
     cleanup(db, dir);
   });
 });
@@ -772,7 +771,7 @@ describe('MemoryDatabase - relevance filtering', () => {
     cleanup(db, dir);
   });
 
-  it('auto-boost is not applied to filtered-out results', () => {
+  it('search does not modify importance of any results', () => {
     const { db, dir } = makeTempDb();
 
     db.insertMemory(
@@ -782,15 +781,13 @@ describe('MemoryDatabase - relevance filtering', () => {
         importance: 0.5,
       }),
     );
-    // Give noise a very different embedding from the query
     db.updateMemoryEmbedding('noise', makeEmbedding(999));
 
-    // Search with a different embedding — vec similarity will be low, FTS won't match
     db.hybridSearchMemories('machine learning', makeEmbedding(1), 10, { topicThreshold: 0.05 });
 
     const row = db.getMemoryByIdRaw('noise');
     assert.ok(row);
-    assert.equal(row.importance, 0.5, 'Importance should not change for filtered-out results');
+    assert.equal(row.importance, 0.5, 'Importance should not change after search');
     cleanup(db, dir);
   });
 
@@ -1235,32 +1232,23 @@ describe('MemoryDatabase - getMemoryByIdRaw', () => {
 // ==========================================================
 // Dynamic importance boost on access
 // ==========================================================
-describe('MemoryDatabase - dynamic importance boost', () => {
-  it('adds +0.01 importance on getMemoryById', () => {
+describe('MemoryDatabase - access does not modify importance', () => {
+  it('getMemoryById does not boost importance', () => {
     const { db, dir } = makeTempDb();
     db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.5 }));
 
     db.getMemoryById('mem1');
-    const row = db.getMemoryByIdRaw('mem1');
-    assert.ok(row);
-    assert.ok(Math.abs(row.importance - 0.51) < 0.001, `Expected ~0.51 but got ${row.importance}`);
-
-    cleanup(db, dir);
-  });
-
-  it('caps importance at 0.95', () => {
-    const { db, dir } = makeTempDb();
-    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.95 }));
-
     db.getMemoryById('mem1');
+    db.getMemoryById('mem1');
+
     const row = db.getMemoryByIdRaw('mem1');
     assert.ok(row);
-    assert.ok(row.importance <= 0.95, `Expected <= 0.95 but got ${row.importance}`);
+    assert.equal(row.importance, 0.5);
 
     cleanup(db, dir);
   });
 
-  it('is not applied by getMemoryByIdRaw', () => {
+  it('getMemoryByIdRaw does not modify importance', () => {
     const { db, dir } = makeTempDb();
     db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.5 }));
 
@@ -1298,7 +1286,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
     db.decayImportance(30, 0.10);
     const row = db.getMemoryByIdRaw('low-access');
     assert.ok(row);
-    assert.ok(Math.abs(row.importance - 0.6) < 0.001, `Expected ~0.6 but got ${row.importance}`);
+    assert.ok(Math.abs(row.importance - 0.63) < 0.001, `Expected ~0.63 but got ${row.importance}`);
 
     cleanup(db, dir);
   });
@@ -1321,7 +1309,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
     db.decayImportance(30, 0.10);
     const row = db.getMemoryByIdRaw('mid-access');
     assert.ok(row);
-    assert.ok(Math.abs(row.importance - 0.65) < 0.001, `Expected ~0.65 but got ${row.importance}`);
+    assert.ok(Math.abs(row.importance - 0.665) < 0.001, `Expected ~0.665 but got ${row.importance}`);
 
     cleanup(db, dir);
   });
@@ -1344,7 +1332,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
     db.decayImportance(30, 0.10);
     const row = db.getMemoryByIdRaw('high-access');
     assert.ok(row);
-    assert.ok(Math.abs(row.importance - 0.675) < 0.001, `Expected ~0.675 but got ${row.importance}`);
+    assert.ok(Math.abs(row.importance - 0.6825) < 0.001, `Expected ~0.6825 but got ${row.importance}`);
 
     cleanup(db, dir);
   });
