@@ -414,12 +414,25 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
 
     const patternTexts: string[] = [];
     const patternClusters: number[][] = [];
+    const patternQualities: number[] = [];
 
     for (const cluster of clusters) {
+      const clusterEmbs = cluster.map((idx) => bufferToEmbedding(clusterCandidates[idx].embedding));
+
+      let pairSum = 0;
+      let pairCount = 0;
+      for (let a = 0; a < clusterEmbs.length; a++) {
+        for (let b = a + 1; b < clusterEmbs.length; b++) {
+          pairSum += cosineSimilarity(clusterEmbs[a], clusterEmbs[b]);
+          pairCount++;
+        }
+      }
+      const avgSimilarity = pairCount > 0 ? pairSum / pairCount : 0;
+      if (avgSimilarity < THRESHOLDS.CLUSTER_QUALITY_MIN) continue;
+
       const dim = 384;
       const centroid = new Float32Array(dim);
-      for (const idx of cluster) {
-        const emb = bufferToEmbedding(clusterCandidates[idx].embedding);
+      for (const emb of clusterEmbs) {
         for (let d = 0; d < dim; d++) centroid[d] += emb[d];
       }
       for (let d = 0; d < dim; d++) centroid[d] /= cluster.length;
@@ -445,6 +458,7 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
       const content = `Recurring theme across ${cluster.length} sessions: ${taskDescriptions.join(' | ')}`;
       patternTexts.push(`${title}: ${content}`);
       patternClusters.push(cluster);
+      patternQualities.push(avgSimilarity);
     }
 
     if (patternTexts.length > 0) {
