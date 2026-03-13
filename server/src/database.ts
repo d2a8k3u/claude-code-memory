@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import type { MemoryRow, Relation, MemoryType, RelationType } from './types.js';
 import { embeddingToBuffer, bufferToEmbedding } from './embeddings.js';
 import { THRESHOLDS } from './thresholds.js';
+import type { ScoringWeights } from './thresholds.js';
 
 const SCHEMA_VERSION = 1;
 
@@ -18,6 +19,25 @@ function sanitizeFtsQuery(query: string): string {
 // (negative IDF). An FTS match still indicates topic relevance, so we apply a floor
 // to distinguish "FTS matched with common terms" from "FTS didn't match at all".
 const FTS_MATCH_FLOOR = 0.05;
+
+/** Two-phase recency decay: steep 0–7 day drop, then gradual exponential plateau. */
+export function recencyScore(ageDays: number): number {
+  if (ageDays <= 0) return 1.0;
+  if (ageDays <= THRESHOLDS.RECENCY_SHORT_TERM_DAYS) {
+    return 1 - THRESHOLDS.RECENCY_SHORT_TERM_DROP * (ageDays / THRESHOLDS.RECENCY_SHORT_TERM_DAYS);
+  }
+  return (
+    (1 - THRESHOLDS.RECENCY_SHORT_TERM_DROP) *
+    Math.exp(-(ageDays - THRESHOLDS.RECENCY_SHORT_TERM_DAYS) / THRESHOLDS.RECENCY_LONG_TERM_TAU)
+  );
+}
+
+/** Penalty for overly long content that tends to match many queries generically. */
+export function contentLengthPenalty(contentLength: number): number {
+  if (contentLength <= THRESHOLDS.CONTENT_LENGTH_PENALTY_START) return 0;
+  const excess = contentLength - THRESHOLDS.CONTENT_LENGTH_PENALTY_START;
+  return THRESHOLDS.CONTENT_LENGTH_PENALTY_MAX * (1 - Math.exp(-excess / THRESHOLDS.CONTENT_LENGTH_PENALTY_SCALE));
+}
 
 export type RelevanceFilterOptions = {
   topicThreshold?: number;
@@ -248,6 +268,7 @@ export class MemoryDatabase {
     queryEmbedding: Float32Array | null,
     limit = 20,
     filter?: RelevanceFilterOptions,
+    weights?: ScoringWeights,
   ): ScoredMemoryRow[] {
     const ftsResults = new Map<string, { row: MemoryRow; ftsScore: number }>();
     const safeQuery = sanitizeFtsQuery(query);
@@ -301,6 +322,7 @@ export class MemoryDatabase {
     const now = Date.now();
     const topicThreshold = filter?.topicThreshold ?? 0.05;
     const relevanceThreshold = filter?.relevanceThreshold ?? 0;
+    const w = weights ?? THRESHOLDS.SCORING_WEIGHTS;
 
     for (const id of allIds) {
       const fts = ftsResults.get(id);
@@ -327,11 +349,19 @@ export class MemoryDatabase {
 
       const ageMs = now - new Date(row.created_at).getTime();
       const ageDays = ageMs / (1000 * 60 * 60 * 24);
-      const recencyBoost = Math.exp(-ageDays / 90);
+      const recencyBoost = recencyScore(ageDays);
       const accessBoost = Math.min(1, Math.log2(row.access_count + 1) / 5);
       const importanceWeight = row.importance;
+      const lengthPenalty = contentLengthPenalty(row.content.length);
 
-      const finalScore = textScore * 0.5 + importanceWeight * 0.2 + recencyBoost * 0.2 + accessBoost * 0.1;
+      const finalScore = Math.max(
+        0,
+        textScore * w.textScore +
+          importanceWeight * w.importance +
+          recencyBoost * w.recency +
+          accessBoost * w.access -
+          lengthPenalty,
+      );
 
       if (relevanceThreshold > 0 && finalScore < relevanceThreshold) continue;
 
