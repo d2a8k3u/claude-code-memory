@@ -184,7 +184,8 @@ export class MemoryDatabase {
       this.db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = @id`).run(params);
 
       this.db.prepare('DELETE FROM memories_fts WHERE rowid = (SELECT rowid FROM memories WHERE id = ?)').run(id);
-      const updated = this.getMemoryByIdRaw(id)!;
+      const updated = this.getMemoryByIdRaw(id);
+      if (!updated) throw new Error(`Memory ${id} not found after update`);
       this.db
         .prepare(
           `INSERT INTO memories_fts (rowid, title, content, tags)
@@ -410,7 +411,9 @@ export class MemoryDatabase {
     const queue: { nodeId: string; currentDepth: number }[] = [{ nodeId: id, currentDepth: 0 }];
 
     while (queue.length > 0) {
-      const { nodeId, currentDepth } = queue.shift()!;
+      const entry = queue.shift();
+      if (!entry) break;
+      const { nodeId, currentDepth } = entry;
       if (visited.has(nodeId) || currentDepth > depth || visited.size >= maxNodes) continue;
       visited.add(nodeId);
 
@@ -602,9 +605,11 @@ export class MemoryDatabase {
          ) v
          JOIN memories m ON m.rowid = v.vec_rowid`;
 
-    const rows = (
-      type ? this.db.prepare(sql).all(embedding, type) : this.db.prepare(sql).all(embedding)
-    ) as { id: string; distance: number; vec_rowid: number }[];
+    const rows = (type ? this.db.prepare(sql).all(embedding, type) : this.db.prepare(sql).all(embedding)) as {
+      id: string;
+      distance: number;
+      vec_rowid: number;
+    }[];
 
     if (rows.length > 0 && rows[0].distance < threshold) {
       return { id: rows[0].id, distance: rows[0].distance };

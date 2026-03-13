@@ -34,9 +34,9 @@ describe('allocateBudget', () => {
 
     const { allocated } = allocateBudget(sections);
 
-    assert.ok(allocated.get('episodic')!.length >= 1, 'episodic should get at least min (1)');
-    assert.ok(allocated.get('pattern')!.length >= 1, 'pattern should get at least min (1)');
-    assert.ok(allocated.get('procedural')!.length >= 1, 'procedural should get at least min (1)');
+    assert.ok((allocated.get('episodic') ?? []).length >= 1, 'episodic should get at least min (1)');
+    assert.ok((allocated.get('pattern') ?? []).length >= 1, 'pattern should get at least min (1)');
+    assert.ok((allocated.get('procedural') ?? []).length >= 1, 'procedural should get at least min (1)');
   });
 
   it('distributes overflow to highest-quality candidates', () => {
@@ -58,16 +58,14 @@ describe('allocateBudget', () => {
 
     // Relevant has the highest quality candidates, so overflow should go there
     assert.ok(
-      allocated.get('relevant')!.length > CONTEXT_BUDGET.relevant.min,
+      (allocated.get('relevant') ?? []).length > CONTEXT_BUDGET.relevant.min,
       'relevant should get overflow slots due to high quality',
     );
   });
 
   it('respects per-section maximums', () => {
     // Create more candidates than max for relevant
-    const relevantCandidates = Array.from({ length: 20 }, (_, i) =>
-      makeCandidate(`r${i}`, 0.9 - i * 0.01),
-    );
+    const relevantCandidates = Array.from({ length: 20 }, (_, i) => makeCandidate(`r${i}`, 0.9 - i * 0.01));
 
     const sections = [
       makeSection('relevant', relevantCandidates),
@@ -80,7 +78,7 @@ describe('allocateBudget', () => {
     const { allocated } = allocateBudget(sections);
 
     assert.ok(
-      allocated.get('relevant')!.length <= CONTEXT_BUDGET.relevant.max,
+      (allocated.get('relevant') ?? []).length <= CONTEXT_BUDGET.relevant.max,
       `relevant should not exceed max (${CONTEXT_BUDGET.relevant.max})`,
     );
   });
@@ -139,10 +137,10 @@ describe('allocateBudget', () => {
 
     const { allocated } = allocateBudget(sections);
 
-    assert.equal(allocated.get('relevant')!.length, 0);
-    assert.equal(allocated.get('pattern')!.length, 0);
-    assert.ok(allocated.get('episodic')!.length >= 1);
-    assert.ok(allocated.get('semantic')!.length >= 1);
+    assert.equal((allocated.get('relevant') ?? []).length, 0);
+    assert.equal((allocated.get('pattern') ?? []).length, 0);
+    assert.ok((allocated.get('episodic') ?? []).length >= 1);
+    assert.ok((allocated.get('semantic') ?? []).length >= 1);
   });
 
   it('gives unused min-budget to other sections', () => {
@@ -150,7 +148,10 @@ describe('allocateBudget', () => {
     const sections = [
       makeSection('relevant', []),
       makeSection('episodic', [makeCandidate('e1', 0.5)]),
-      makeSection('semantic', Array.from({ length: 8 }, (_, i) => makeCandidate(`s${i}`, 0.9 - i * 0.05))),
+      makeSection(
+        'semantic',
+        Array.from({ length: 8 }, (_, i) => makeCandidate(`s${i}`, 0.9 - i * 0.05)),
+      ),
       makeSection('pattern', [makeCandidate('p1', 0.4)]),
       makeSection('procedural', [makeCandidate('pr1', 0.3)]),
     ];
@@ -159,18 +160,14 @@ describe('allocateBudget', () => {
 
     // Semantic should get more than its min because relevant's budget is unused
     assert.ok(
-      allocated.get('semantic')!.length > CONTEXT_BUDGET.semantic.min,
+      (allocated.get('semantic') ?? []).length > CONTEXT_BUDGET.semantic.min,
       'semantic should expand when other sections are empty',
     );
   });
 
   it('preserves candidate ordering within sections', () => {
     const sections = [
-      makeSection('relevant', [
-        makeCandidate('r1', 0.9),
-        makeCandidate('r2', 0.5),
-        makeCandidate('r3', 0.3),
-      ]),
+      makeSection('relevant', [makeCandidate('r1', 0.9), makeCandidate('r2', 0.5), makeCandidate('r3', 0.3)]),
       makeSection('episodic', [makeCandidate('e1', 0.1)]),
       makeSection('semantic', [makeCandidate('s1', 0.1)]),
       makeSection('pattern', [makeCandidate('p1', 0.1)]),
@@ -178,7 +175,7 @@ describe('allocateBudget', () => {
     ];
 
     const { allocated } = allocateBudget(sections);
-    const relevantItems = allocated.get('relevant')!;
+    const relevantItems = allocated.get('relevant') ?? [];
 
     for (let i = 1; i < relevantItems.length; i++) {
       assert.ok(

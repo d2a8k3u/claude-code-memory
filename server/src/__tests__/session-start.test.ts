@@ -31,10 +31,10 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
 
   it('returns valid output with no memories and no git signals', async () => {
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    assert.ok(result.hookSpecificOutput);
-    assert.equal(result.hookSpecificOutput!.hookEventName, 'SessionStart');
-    assert.ok(result.hookSpecificOutput!.additionalContext.includes('# Project Memory Context'));
-    assert.ok(result.hookSpecificOutput!.additionalContext.includes('session #1'));
+    assert.ok(result.hookSpecificOutput, 'hookSpecificOutput should be defined');
+    assert.equal(result.hookSpecificOutput.hookEventName, 'SessionStart');
+    assert.ok(result.hookSpecificOutput.additionalContext.includes('# Project Memory Context'));
+    assert.ok(result.hookSpecificOutput.additionalContext.includes('session #1'));
     cleanup(db, dir);
   });
 
@@ -42,7 +42,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    assert.ok(result.hookSpecificOutput!.additionalContext.includes('session #3'));
+    assert.ok(result.hookSpecificOutput);
+    assert.ok(result.hookSpecificOutput.additionalContext.includes('session #3'));
     cleanup(db, dir);
   });
 
@@ -72,7 +73,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
 
     // Use a CWD with all segments < 3 chars so no CWD signals are produced
     const result = await handleSessionStart(db, { cwd: '/a/bb' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('Key Knowledge'));
     assert.ok(ctx.includes('Project Architecture'));
@@ -95,7 +97,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     const occurrences = ctx.split('Shared Memory').length - 1;
     assert.ok(occurrences <= 1, `Memory appeared ${occurrences} times, expected at most 1`);
@@ -125,7 +128,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     const keyKnowledgeIdx = ctx.indexOf('## Key Knowledge');
     if (keyKnowledgeIdx >= 0) {
@@ -149,7 +153,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('Recent Sessions'));
     assert.ok(ctx.includes('authentication module'));
@@ -170,7 +175,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('Patterns & Conventions'));
     assert.ok(ctx.includes('Error Handling Pattern'));
@@ -186,7 +192,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     seedMemory(db, 'ep-1', { type: 'episodic', content: 'event one', importance: 0.5 }, 2);
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     // Should NOT include old "Consolidation Due" prompt — consolidation is now automated
     assert.ok(!ctx.includes('Consolidation Due'), 'Should not show old consolidation prompt');
@@ -218,7 +225,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
 
     const beforeCount = db.countMemories();
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
     const afterCount = db.countMemories();
 
     assert.ok(afterCount < beforeCount, 'Stale memory should be deleted');
@@ -240,7 +248,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/a/bb' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('*(score:'), 'Key Knowledge should include relevance score');
     assert.ok(/\*\(score: \d+\.\d{2}\)\*/.test(ctx), 'Score should be formatted as *(score: X.XX)*');
@@ -259,7 +268,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     const recentIdx = ctx.indexOf('## Recent Sessions');
     if (recentIdx >= 0) {
@@ -275,7 +285,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     db.setSessionMeta('last_consolidation', '0');
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(!ctx.includes('Consolidation Due'));
     cleanup(db, dir);
@@ -293,7 +304,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('1 working cleared'));
     cleanup(db, dir);

@@ -784,7 +784,9 @@ describe('handleMemoryTool - memory_store contradiction candidates', () => {
 
   it('returns "Related memories" when similar memories exist', async () => {
     // Store a first memory
-    db.insertMemory(makeMemoryRow({ id: 'existing', content: 'authentication uses JWT tokens for session management' }));
+    db.insertMemory(
+      makeMemoryRow({ id: 'existing', content: 'authentication uses JWT tokens for session management' }),
+    );
     const emb = makeEmbedding(42);
     db.updateMemoryEmbedding('existing', emb);
 
@@ -798,10 +800,7 @@ describe('handleMemoryTool - memory_store contradiction candidates', () => {
 
     const text = getText(result);
     // The result should either include "Related memories" or "Merged" depending on similarity
-    assert.ok(
-      text.includes('Memory stored successfully') || text.includes('Merged'),
-      'Should either store or merge',
-    );
+    assert.ok(text.includes('Memory stored successfully') || text.includes('Merged'), 'Should either store or merge');
 
     cleanup(db, dir);
   });

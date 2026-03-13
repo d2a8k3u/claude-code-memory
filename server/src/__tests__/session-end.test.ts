@@ -3,9 +3,18 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MemoryDatabase } from '../database.js';
-import { handleSessionEnd, parseListContent, computeSubstanceScore, SUBSTANCE_THRESHOLD, isTrivialCommand, parseWorkflowCommands, parseItemsWithCounts, formatItemsWithCounts, SEMANTIC_SINGLETON_CAP } from '../cli/session-end.js';
-import { makeTempDb, cleanup, makeEmbedding } from './helpers.js';
-import { embeddingToBuffer } from '../embeddings.js';
+import {
+  handleSessionEnd,
+  parseListContent,
+  computeSubstanceScore,
+  SUBSTANCE_THRESHOLD,
+  isTrivialCommand,
+  parseWorkflowCommands,
+  parseItemsWithCounts,
+  formatItemsWithCounts,
+  SEMANTIC_SINGLETON_CAP,
+} from '../cli/session-end.js';
+import { makeTempDb, cleanup } from './helpers.js';
 
 function writeTranscript(dir: string, lines: object[]): string {
   const path = join(dir, 'transcript.jsonl');
@@ -164,17 +173,14 @@ describe('handleSessionEnd - unified episodic record', () => {
 
 describe('parseListContent', () => {
   it('extracts comma-separated items after colon', () => {
-    assert.deepEqual(
-      parseListContent('Technology stack used: typescript, npm, node'),
-      ['typescript', 'npm', 'node'],
-    );
+    assert.deepEqual(parseListContent('Technology stack used: typescript, npm, node'), ['typescript', 'npm', 'node']);
   });
 
   it('trims whitespace from items', () => {
-    assert.deepEqual(
-      parseListContent('Active modules/directories:  server/src ,  server/test '),
-      ['server/src', 'server/test'],
-    );
+    assert.deepEqual(parseListContent('Active modules/directories:  server/src ,  server/test '), [
+      'server/src',
+      'server/test',
+    ]);
   });
 
   it('returns empty array when no colon', () => {
@@ -182,10 +188,7 @@ describe('parseListContent', () => {
   });
 
   it('filters out empty strings', () => {
-    assert.deepEqual(
-      parseListContent('Tech: a,, b, ,c'),
-      ['a', 'b', 'c'],
-    );
+    assert.deepEqual(parseListContent('Tech: a,, b, ,c'), ['a', 'b', 'c']);
   });
 });
 
@@ -198,9 +201,7 @@ describe('handleSessionEnd - substance gating', () => {
   });
 
   it('skips episodic when task summary is too short and no substance', async () => {
-    const transcriptPath = writeTranscript(dir, [
-      { role: 'user', content: 'hi' },
-    ]);
+    const transcriptPath = writeTranscript(dir, [{ role: 'user', content: 'hi' }]);
 
     await handleSessionEnd(db, { transcript_path: transcriptPath, cwd: dir });
 
@@ -388,7 +389,11 @@ describe('computeSubstanceScore', () => {
       filesModified: [],
       errorCount: 0,
       memoryStores: 0,
-      bashCommands: Array.from({ length: 10 }, () => ({ command: 'npm run build', success: true as const, category: 'build' as const })),
+      bashCommands: Array.from({ length: 10 }, () => ({
+        command: 'npm run build',
+        success: true as const,
+        category: 'build' as const,
+      })),
     });
     assert.equal(score, 7); // 1*2 + 0 + 0 + 0 + min(10,5)
   });
@@ -518,17 +523,11 @@ describe('isTrivialCommand', () => {
 
 describe('parseWorkflowCommands', () => {
   it('extracts commands from workflow content', () => {
-    assert.deepEqual(
-      parseWorkflowCommands('Build workflow: tsc && npm run build'),
-      ['tsc', 'npm run build'],
-    );
+    assert.deepEqual(parseWorkflowCommands('Build workflow: tsc && npm run build'), ['tsc', 'npm run build']);
   });
 
   it('handles single command', () => {
-    assert.deepEqual(
-      parseWorkflowCommands('Test workflow: npm test'),
-      ['npm test'],
-    );
+    assert.deepEqual(parseWorkflowCommands('Test workflow: npm test'), ['npm test']);
   });
 
   it('returns empty for content without colon', () => {
@@ -536,10 +535,7 @@ describe('parseWorkflowCommands', () => {
   });
 
   it('trims whitespace from commands', () => {
-    assert.deepEqual(
-      parseWorkflowCommands('Build workflow:  tsc  &&  npm run build  '),
-      ['tsc', 'npm run build'],
-    );
+    assert.deepEqual(parseWorkflowCommands('Build workflow:  tsc  &&  npm run build  '), ['tsc', 'npm run build']);
   });
 });
 
@@ -578,7 +574,14 @@ describe('handleSessionEnd - procedural creation', () => {
   it('creates procedural when category has 3+ non-trivial commands', async () => {
     const transcriptPath = writeTranscript(dir, [
       { role: 'user', content: 'Build the project with all checks and verification' },
-      { role: 'assistant', content: [bashToolUse('b1', 'tsc'), bashToolUse('b2', 'npm run build'), bashToolUse('b3', 'esbuild src/index.ts')] },
+      {
+        role: 'assistant',
+        content: [
+          bashToolUse('b1', 'tsc'),
+          bashToolUse('b2', 'npm run build'),
+          bashToolUse('b3', 'esbuild src/index.ts'),
+        ],
+      },
       toolResult('b1'),
       toolResult('b2'),
       toolResult('b3'),
@@ -599,7 +602,14 @@ describe('handleSessionEnd - procedural creation', () => {
     // echo is trivial, so only 2 non-trivial build commands remain -> no procedural
     const transcriptPath = writeTranscript(dir, [
       { role: 'user', content: 'Build the project with some echo commands' },
-      { role: 'assistant', content: [bashToolUse('b1', 'echo "starting build"'), bashToolUse('b2', 'tsc'), bashToolUse('b3', 'npm run build')] },
+      {
+        role: 'assistant',
+        content: [
+          bashToolUse('b1', 'echo "starting build"'),
+          bashToolUse('b2', 'tsc'),
+          bashToolUse('b3', 'npm run build'),
+        ],
+      },
       toolResult('b1'),
       toolResult('b2'),
       toolResult('b3'),
@@ -615,16 +625,28 @@ describe('handleSessionEnd - procedural creation', () => {
 
   it('skips update when incoming commands are subset of existing', async () => {
     const { makeMemoryRecord: mkRecord } = await import('../cli/shared.js');
-    const existing = mkRecord('procedural', 'Build workflow: tsc && npm run build && esbuild src/index.ts', ['auto-procedural', 'build'], {
-      title: 'Build workflow',
-      context: 'session-end auto-save',
-    });
+    const existing = mkRecord(
+      'procedural',
+      'Build workflow: tsc && npm run build && esbuild src/index.ts',
+      ['auto-procedural', 'build'],
+      {
+        title: 'Build workflow',
+        context: 'session-end auto-save',
+      },
+    );
     db.insertMemory(existing);
     const originalContent = existing.content;
 
     const transcriptPath = writeTranscript(dir, [
       { role: 'user', content: 'Run a quick build to check the project compiles' },
-      { role: 'assistant', content: [bashToolUse('b1', 'tsc'), bashToolUse('b2', 'npm run build'), bashToolUse('b3', 'esbuild src/index.ts')] },
+      {
+        role: 'assistant',
+        content: [
+          bashToolUse('b1', 'tsc'),
+          bashToolUse('b2', 'npm run build'),
+          bashToolUse('b3', 'esbuild src/index.ts'),
+        ],
+      },
       toolResult('b1'),
       toolResult('b2'),
       toolResult('b3'),
@@ -649,7 +671,14 @@ describe('handleSessionEnd - procedural creation', () => {
 
     const transcriptPath = writeTranscript(dir, [
       { role: 'user', content: 'Build the project with extra steps for release' },
-      { role: 'assistant', content: [bashToolUse('b1', 'npm run build'), bashToolUse('b2', 'esbuild src/index.ts'), bashToolUse('b3', 'webpack --mode production')] },
+      {
+        role: 'assistant',
+        content: [
+          bashToolUse('b1', 'npm run build'),
+          bashToolUse('b2', 'esbuild src/index.ts'),
+          bashToolUse('b3', 'webpack --mode production'),
+        ],
+      },
       toolResult('b1'),
       toolResult('b2'),
       toolResult('b3'),
@@ -670,24 +699,24 @@ describe('handleSessionEnd - procedural creation', () => {
 
 describe('parseItemsWithCounts', () => {
   it('parses new format with counts', () => {
-    assert.deepEqual(
-      parseItemsWithCounts('Tech: typescript(5), npm(3)'),
-      [{ name: 'typescript', count: 5 }, { name: 'npm', count: 3 }],
-    );
+    assert.deepEqual(parseItemsWithCounts('Tech: typescript(5), npm(3)'), [
+      { name: 'typescript', count: 5 },
+      { name: 'npm', count: 3 },
+    ]);
   });
 
   it('handles old format without counts (defaults to 1)', () => {
-    assert.deepEqual(
-      parseItemsWithCounts('Tech: typescript, npm'),
-      [{ name: 'typescript', count: 1 }, { name: 'npm', count: 1 }],
-    );
+    assert.deepEqual(parseItemsWithCounts('Tech: typescript, npm'), [
+      { name: 'typescript', count: 1 },
+      { name: 'npm', count: 1 },
+    ]);
   });
 
   it('handles mixed format', () => {
-    assert.deepEqual(
-      parseItemsWithCounts('Tech: typescript(3), npm'),
-      [{ name: 'typescript', count: 3 }, { name: 'npm', count: 1 }],
-    );
+    assert.deepEqual(parseItemsWithCounts('Tech: typescript(3), npm'), [
+      { name: 'typescript', count: 3 },
+      { name: 'npm', count: 1 },
+    ]);
   });
 
   it('returns empty for content without colon', () => {
@@ -698,16 +727,16 @@ describe('parseItemsWithCounts', () => {
 describe('formatItemsWithCounts', () => {
   it('produces correct output', () => {
     assert.equal(
-      formatItemsWithCounts([{ name: 'typescript', count: 5 }, { name: 'npm', count: 3 }]),
+      formatItemsWithCounts([
+        { name: 'typescript', count: 5 },
+        { name: 'npm', count: 3 },
+      ]),
       'typescript(5), npm(3)',
     );
   });
 
   it('handles single item', () => {
-    assert.equal(
-      formatItemsWithCounts([{ name: 'node', count: 1 }]),
-      'node(1)',
-    );
+    assert.equal(formatItemsWithCounts([{ name: 'node', count: 1 }]), 'node(1)');
   });
 });
 
@@ -743,10 +772,15 @@ describe('handleSessionEnd - semantic singleton merge', () => {
   it('increments frequency on re-detection', async () => {
     // Pre-seed with existing tech-stack in new format
     const { makeMemoryRecord: mkRecord } = await import('../cli/shared.js');
-    const existing = mkRecord('semantic', 'Technology stack used: typescript(2), npm(1)', ['auto-semantic', 'tech-stack'], {
-      title: 'Technology stack',
-      context: 'session-end auto-save',
-    });
+    const existing = mkRecord(
+      'semantic',
+      'Technology stack used: typescript(2), npm(1)',
+      ['auto-semantic', 'tech-stack'],
+      {
+        title: 'Technology stack',
+        context: 'session-end auto-save',
+      },
+    );
     db.insertMemory(existing);
 
     // Session detects typescript and node (new item)
@@ -777,7 +811,10 @@ describe('handleSessionEnd - semantic singleton merge', () => {
   it('caps items at SEMANTIC_SINGLETON_CAP', async () => {
     // Pre-seed with max items: first item has high count, rest have count=1
     const { makeMemoryRecord: mkRecord } = await import('../cli/shared.js');
-    const items = [`important(10)`, ...Array.from({ length: SEMANTIC_SINGLETON_CAP - 1 }, (_, i) => `tech${i}(1)`)].join(', ');
+    const items = [
+      `important(10)`,
+      ...Array.from({ length: SEMANTIC_SINGLETON_CAP - 1 }, (_, i) => `tech${i}(1)`),
+    ].join(', ');
     const existing = mkRecord('semantic', `Technology stack used: ${items}`, ['auto-semantic', 'tech-stack'], {
       title: 'Technology stack',
       context: 'session-end auto-save',
@@ -812,10 +849,15 @@ describe('handleSessionEnd - semantic singleton merge', () => {
 
   it('skips update when all incoming items already exist', async () => {
     const { makeMemoryRecord: mkRecord } = await import('../cli/shared.js');
-    const existing = mkRecord('semantic', 'Technology stack used: typescript(3), npm(2)', ['auto-semantic', 'tech-stack'], {
-      title: 'Technology stack',
-      context: 'session-end auto-save',
-    });
+    const existing = mkRecord(
+      'semantic',
+      'Technology stack used: typescript(3), npm(2)',
+      ['auto-semantic', 'tech-stack'],
+      {
+        title: 'Technology stack',
+        context: 'session-end auto-save',
+      },
+    );
     db.insertMemory(existing);
     const originalContent = existing.content;
 

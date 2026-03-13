@@ -68,7 +68,8 @@ function trySplitWithStrategy(content: string, strategy: SplitStrategy, original
     headers.push({ title: extractTitle(match), index: match.index, match });
   }
 
-  const validated = strategy.validateMatch ? headers.filter((h) => strategy.validateMatch!(content, h.match)) : headers;
+  const validateFn = strategy.validateMatch;
+  const validated = validateFn ? headers.filter((h) => validateFn(content, h.match)) : headers;
 
   if (validated.length < MIN_SECTIONS_FOR_SPLIT) return null;
 

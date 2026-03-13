@@ -1283,7 +1283,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    db.decayImportance(30, 0.10);
+    db.decayImportance(30, 0.1);
     const row = db.getMemoryByIdRaw('low-access');
     assert.ok(row);
     assert.ok(Math.abs(row.importance - 0.63) < 0.001, `Expected ~0.63 but got ${row.importance}`);
@@ -1306,7 +1306,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    db.decayImportance(30, 0.10);
+    db.decayImportance(30, 0.1);
     const row = db.getMemoryByIdRaw('mid-access');
     assert.ok(row);
     assert.ok(Math.abs(row.importance - 0.665) < 0.001, `Expected ~0.665 but got ${row.importance}`);
@@ -1329,7 +1329,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    db.decayImportance(30, 0.10);
+    db.decayImportance(30, 0.1);
     const row = db.getMemoryByIdRaw('high-access');
     assert.ok(row);
     assert.ok(Math.abs(row.importance - 0.6825) < 0.001, `Expected ~0.6825 but got ${row.importance}`);
@@ -1352,7 +1352,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    db.decayImportance(30, 0.10);
+    db.decayImportance(30, 0.1);
     const row = db.getMemoryByIdRaw('near-floor');
     assert.ok(row);
     assert.ok(row.importance >= 0.1);
@@ -1376,7 +1376,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    const decayed = db.decayImportance(30, 0.10);
+    const decayed = db.decayImportance(30, 0.1);
     assert.equal(decayed, 0);
 
     cleanup(db, dir);

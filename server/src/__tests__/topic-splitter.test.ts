@@ -54,11 +54,7 @@ describe('splitByTopics — H2 headers', () => {
   });
 
   it('prefixes section titles with original title when provided', () => {
-    const content =
-      '## Schema\n' +
-      'x'.repeat(250) +
-      '\n\n## Search\n' +
-      'y'.repeat(250);
+    const content = '## Schema\n' + 'x'.repeat(250) + '\n\n## Search\n' + 'y'.repeat(250);
 
     const result = splitByTopics(content, 'Architecture Guide');
     assert.equal(result.shouldSplit, true);
@@ -176,12 +172,7 @@ describe('splitByTopics — numbered bold items', () => {
 describe('splitByTopics — preamble', () => {
   it('includes preamble as separate section when substantial', () => {
     const preamble = 'This document describes the complete architecture.\n' + 'x'.repeat(120);
-    const content =
-      preamble +
-      '\n\n## First Section\n' +
-      'a'.repeat(200) +
-      '\n\n## Second Section\n' +
-      'b'.repeat(200);
+    const content = preamble + '\n\n## First Section\n' + 'a'.repeat(200) + '\n\n## Second Section\n' + 'b'.repeat(200);
 
     const result = splitByTopics(content, 'Architecture');
     assert.equal(result.shouldSplit, true);
@@ -193,11 +184,7 @@ describe('splitByTopics — preamble', () => {
   });
 
   it('discards short preamble', () => {
-    const content =
-      'Intro.\n\n## First Section\n' +
-      'a'.repeat(250) +
-      '\n\n## Second Section\n' +
-      'b'.repeat(250);
+    const content = 'Intro.\n\n## First Section\n' + 'a'.repeat(250) + '\n\n## Second Section\n' + 'b'.repeat(250);
 
     const result = splitByTopics(content);
     assert.equal(result.shouldSplit, true);
@@ -214,10 +201,7 @@ describe('splitByTopics — preamble', () => {
 describe('splitByTopics — section filtering', () => {
   it('filters out sections with body < 50 chars', () => {
     const content =
-      '## Big Section\n' +
-      'a'.repeat(250) +
-      '\n\n## Tiny\nAbc\n\n## Another Big Section\n' +
-      'b'.repeat(250);
+      '## Big Section\n' + 'a'.repeat(250) + '\n\n## Tiny\nAbc\n\n## Another Big Section\n' + 'b'.repeat(250);
 
     const result = splitByTopics(content);
     assert.equal(result.shouldSplit, true);
@@ -263,9 +247,9 @@ describe('insertSplitSections', () => {
     // Verify titles stored correctly
     for (let i = 0; i < 3; i++) {
       const mem = db.getMemoryByIdRaw(result.insertedIds[i]);
-      assert.ok(mem);
-      assert.equal(mem!.title, sections[i].title);
-      assert.equal(mem!.type, 'semantic');
+      assert.ok(mem, `memory ${result.insertedIds[i]} should exist`);
+      assert.equal(mem.title, sections[i].title);
+      assert.equal(mem.type, 'semantic');
     }
 
     cleanup(db, dir);
@@ -367,8 +351,8 @@ describe('insertSplitSections', () => {
 
     for (const id of result.newIds) {
       const mem = db.getMemoryByIdRaw(id);
-      assert.ok(mem);
-      const tags = JSON.parse(mem!.tags);
+      assert.ok(mem, `memory ${id} should exist`);
+      const tags = JSON.parse(mem.tags);
       assert.ok(tags.includes('split-origin'), 'should have split-origin tag');
       assert.ok(tags.includes('existing-tag'), 'should preserve existing tags');
     }

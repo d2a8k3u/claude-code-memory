@@ -15,7 +15,7 @@ export type Memory = {
   updated_at: string;
   access_count: number;
   last_accessed: string | null;
-}
+};
 
 export type MemoryRow = {
   id: string;
@@ -30,14 +30,14 @@ export type MemoryRow = {
   updated_at: string;
   access_count: number;
   last_accessed: string | null;
-}
+};
 
 export type Relation = {
   source_id: string;
   target_id: string;
   relation_type: RelationType;
   weight: number;
-}
+};
 
 export function rowToMemory(row: MemoryRow): Memory {
   return {

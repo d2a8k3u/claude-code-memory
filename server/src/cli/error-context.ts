@@ -47,7 +47,10 @@ export function handleErrorContext(db: MemoryDatabase, input: HookInput): HookOu
   const pathMatch = first500.match(/(?:\/[\w.-]+){2,}/g);
   if (pathMatch) {
     for (const p of pathMatch.slice(0, 3)) {
-      const basename = p.split('/').pop()?.replace(/\.[^.]+$/, '');
+      const basename = p
+        .split('/')
+        .pop()
+        ?.replace(/\.[^.]+$/, '');
       if (basename && basename.length > 2) searchTerms.add(basename);
     }
   }
