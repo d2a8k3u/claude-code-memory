@@ -191,7 +191,8 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
       const content = typeof msg.content === 'string' ? msg.content : '';
 
       if (toolUseId && pendingBash.has(toolUseId)) {
-        const cmd = pendingBash.get(toolUseId)!;
+        const cmd = pendingBash.get(toolUseId);
+        if (!cmd) continue;
         pendingBash.delete(toolUseId);
         const isError = /\b(error|Error|ERROR|failed|FAILED|Traceback|ENOENT|exit code [1-9])\b/.test(content);
         result.bashCommands.push({

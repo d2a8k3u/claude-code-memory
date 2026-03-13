@@ -46,9 +46,7 @@ describe('Integration: Embedding Model', { timeout: 120_000 }, () => {
     const available = await timed('isEmbeddingsAvailable()', () => isEmbeddingsAvailable());
     assert.ok(available, 'Embeddings model should be available');
 
-    const embedding = await timed('generateEmbedding()', () =>
-      generateEmbedding('test embedding generation'),
-    );
+    const embedding = await timed('generateEmbedding()', () => generateEmbedding('test embedding generation'));
     assert.ok(embedding, 'Should produce an embedding');
     assert.equal(embedding.length, 384, 'Should be 384-dimensional');
 
@@ -99,9 +97,7 @@ describe('Integration: Full Lifecycle', { timeout: 120_000 }, () => {
     assert.ok(searchText.includes('hybrid'), 'Should use hybrid search mode');
 
     // Get
-    const getResult = await timed('memory_get', () =>
-      handleMemoryTool(db, 'memory_get', { id }),
-    );
+    const getResult = await timed('memory_get', () => handleMemoryTool(db, 'memory_get', { id }));
     const getOutput = getText(getResult);
     assert.ok(getOutput.includes('Redis Pub/Sub'), 'Get should return the title');
     assert.ok(getOutput.includes('pub/sub'), 'Get should return the content');
@@ -125,15 +121,11 @@ describe('Integration: Full Lifecycle', { timeout: 120_000 }, () => {
     assert.ok(getText(search2).includes(id), 'Search should still find updated memory');
 
     // Delete
-    const deleteResult = await timed('memory_delete', () =>
-      handleMemoryTool(db, 'memory_delete', { id }),
-    );
+    const deleteResult = await timed('memory_delete', () => handleMemoryTool(db, 'memory_delete', { id }));
     assert.ok(getText(deleteResult).includes('deleted'));
 
     // Verify gone
-    const getGone = await timed('memory_get (deleted)', () =>
-      handleMemoryTool(db, 'memory_get', { id }),
-    );
+    const getGone = await timed('memory_get (deleted)', () => handleMemoryTool(db, 'memory_get', { id }));
     assert.ok(getText(getGone).includes('not found'));
   });
 });
@@ -177,10 +169,7 @@ describe('Integration: Search with Backfill', { timeout: 120_000 }, () => {
     );
     const searchText = getText(searchResult);
     assert.ok(searchText.includes('Found'), `Backfill+search failed: ${searchText}`);
-    assert.ok(
-      searchText.includes('database connection pooling'),
-      'Should find the relevant memory',
-    );
+    assert.ok(searchText.includes('database connection pooling'), 'Should find the relevant memory');
 
     // Verify embeddings were backfilled
     const stillWithout = db.getMemoryIdsWithoutEmbedding();
@@ -293,8 +282,16 @@ describe('Integration: Batch Deduplication', { timeout: 120_000 }, () => {
     const result = await timed('batch with within-batch duplicate', () =>
       handleMemoryTool(db, 'memory_store_batch', {
         memories: [
-          { type: 'semantic', content: 'Docker containers provide lightweight isolated environments for applications', tags: ['docker'] },
-          { type: 'semantic', content: 'Docker containers provide lightweight isolated environments for applications', tags: ['containers'] },
+          {
+            type: 'semantic',
+            content: 'Docker containers provide lightweight isolated environments for applications',
+            tags: ['docker'],
+          },
+          {
+            type: 'semantic',
+            content: 'Docker containers provide lightweight isolated environments for applications',
+            tags: ['containers'],
+          },
         ],
       }),
     );
@@ -323,7 +320,11 @@ describe('Integration: Batch Deduplication', { timeout: 120_000 }, () => {
     const result = await timed('batch with DB duplicate', () =>
       handleMemoryTool(db, 'memory_store_batch', {
         memories: [
-          { type: 'semantic', content: 'Docker containers provide lightweight isolated environments for applications', tags: ['containers'] },
+          {
+            type: 'semantic',
+            content: 'Docker containers provide lightweight isolated environments for applications',
+            tags: ['containers'],
+          },
           { type: 'semantic', content: 'Kubernetes orchestrates container deployments across clusters', tags: ['k8s'] },
         ],
       }),
@@ -361,8 +362,16 @@ describe('Integration: Batch Store', { timeout: 120_000 }, () => {
       handleMemoryTool(db, 'memory_store_batch', {
         memories: [
           { type: 'semantic', content: 'GraphQL provides a query language for APIs', tags: ['graphql'] },
-          { type: 'procedural', content: 'To set up GraphQL: install apollo-server, define schema, implement resolvers', tags: ['graphql'] },
-          { type: 'pattern', content: 'Use DataLoader to batch and cache database queries in GraphQL resolvers', title: 'GraphQL N+1 Prevention' },
+          {
+            type: 'procedural',
+            content: 'To set up GraphQL: install apollo-server, define schema, implement resolvers',
+            tags: ['graphql'],
+          },
+          {
+            type: 'pattern',
+            content: 'Use DataLoader to batch and cache database queries in GraphQL resolvers',
+            title: 'GraphQL N+1 Prevention',
+          },
           { type: 'episodic', content: 'Migrated REST API to GraphQL, reduced payload size by 40%' },
         ],
       }),
@@ -449,9 +458,7 @@ describe('Integration: Relations & Graph', { timeout: 120_000 }, () => {
     assert.ok(graphText.includes('derived_from'));
 
     // Get shows relations
-    const getResult = await timed('memory_get (with relations)', () =>
-      handleMemoryTool(db, 'memory_get', { id: id2 }),
-    );
+    const getResult = await timed('memory_get (with relations)', () => handleMemoryTool(db, 'memory_get', { id: id2 }));
     assert.ok(getText(getResult).includes('Relations'));
   });
 });
@@ -484,9 +491,7 @@ describe('Integration: All Memory Types', { timeout: 120_000 }, () => {
     assert.equal(db.countMemories(), 5);
 
     // List all
-    const listAll = await timed('memory_list (all)', () =>
-      handleMemoryTool(db, 'memory_list', { limit: 10 }),
-    );
+    const listAll = await timed('memory_list (all)', () => handleMemoryTool(db, 'memory_list', { limit: 10 }));
     assert.ok(getText(listAll).includes('5 memor'));
 
     // Filter by each type
@@ -560,7 +565,15 @@ describe('Integration: Cleanup & Maintenance', { timeout: 60_000 }, () => {
   it('working memory cleanup, episodic cleanup, and importance decay', async () => {
     // Old working memory (inserted directly to control created_at)
     const oldDate = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
-    db.insertMemory(makeMemoryRow({ id: 'old-working', type: 'working', content: 'stale scratch', created_at: oldDate, updated_at: oldDate }));
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'old-working',
+        type: 'working',
+        content: 'stale scratch',
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
 
     // Fresh working memory via tool
     await handleMemoryTool(db, 'memory_store', { type: 'working', content: 'fresh scratch' });
@@ -572,13 +585,31 @@ describe('Integration: Cleanup & Maintenance', { timeout: 60_000 }, () => {
 
     // Old episodic memory
     const veryOld = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString();
-    db.insertMemory(makeMemoryRow({ id: 'old-ep', type: 'episodic', content: 'old session', importance: 0.3, created_at: veryOld, updated_at: veryOld }));
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'old-ep',
+        type: 'episodic',
+        content: 'old session',
+        importance: 0.3,
+        created_at: veryOld,
+        updated_at: veryOld,
+      }),
+    );
     const epCleaned = db.cleanupOldEpisodicMemories(90);
     assert.equal(epCleaned, 1);
 
     // Importance decay
     const staleDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
-    db.insertMemory(makeMemoryRow({ id: 'stale', type: 'semantic', content: 'unused fact', importance: 0.7, created_at: staleDate, updated_at: staleDate }));
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'stale',
+        type: 'semantic',
+        content: 'unused fact',
+        importance: 0.7,
+        created_at: staleDate,
+        updated_at: staleDate,
+      }),
+    );
     const decayed = db.decayImportance(30, 0.05);
     assert.equal(decayed, 1);
   });

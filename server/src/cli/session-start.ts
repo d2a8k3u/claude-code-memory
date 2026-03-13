@@ -57,7 +57,8 @@ export function allocateBudget(sections: ContextSection[]): {
 
   for (const section of sections) {
     const config = CONTEXT_BUDGET[section.name];
-    const items = allocated.get(section.name)!;
+    const items = allocated.get(section.name);
+    if (!items) continue;
     for (const candidate of section.candidates) {
       if (items.length >= config.min || remaining <= 0) break;
       if (seenIds.has(candidate.memory.id)) continue;
@@ -79,8 +80,9 @@ export function allocateBudget(sections: ContextSection[]): {
   for (const { section, candidate } of pool) {
     if (remaining <= 0) break;
     const config = CONTEXT_BUDGET[section];
-    if (allocated.get(section)!.length >= config.max) continue;
-    allocated.get(section)!.push(candidate);
+    const items = allocated.get(section);
+    if (!items || items.length >= config.max) continue;
+    items.push(candidate);
     seenIds.add(candidate.memory.id);
     remaining--;
   }
