@@ -13,6 +13,7 @@ import { extractGitSignals } from './git-signals.js';
 import { makeMemoryRecord, derivePatternTitle } from './shared.js';
 import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
 import { safeParseTags } from '../merge-utils.js';
+import { THRESHOLDS } from '../thresholds.js';
 
 interface SearchChannel {
   query: string;
@@ -310,7 +311,7 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
   let totalMerged = 0;
 
   for (const type of types) {
-    const pairs = db.findNearDuplicatePairs(type, 0.08, 10);
+    const pairs = db.findNearDuplicatePairs(type, THRESHOLDS.NEAR_DUPLICATE, 10);
     for (const pair of pairs) {
       if (db.mergeMemories(pair.id1, pair.id2)) {
         totalMerged++;
@@ -402,7 +403,7 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
         if (assigned.has(j)) continue;
         const embJ = bufferToEmbedding(clusterCandidates[j].embedding);
         const similarity = cosineSimilarity(embI, embJ);
-        if (similarity >= 0.4 && similarity <= 0.95) {
+        if (similarity >= THRESHOLDS.CLUSTER_MIN && similarity <= THRESHOLDS.CLUSTER_MAX) {
           cluster.push(j);
           assigned.add(j);
         }
@@ -430,7 +431,7 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
       let covered = false;
       for (const pat of existingPatterns) {
         const patEmb = bufferToEmbedding(pat.embedding);
-        if (cosineSimilarity(centroid, patEmb) > 0.5) {
+        if (cosineSimilarity(centroid, patEmb) > THRESHOLDS.PATTERN_OVERLAP) {
           covered = true;
           break;
         }
@@ -453,7 +454,7 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
         const emb = patternEmbeddings[i];
         if (!emb) continue;
 
-        const similar = db.findSimilarMemory(emb, 0.05);
+        const similar = db.findSimilarMemory(emb, THRESHOLDS.EXACT_DUPLICATE);
         if (similar) continue;
 
         const cluster = patternClusters[i];
@@ -463,9 +464,10 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
         const title = derivePatternTitle(taskDescriptions);
         const content = patternTexts[i].slice(patternTexts[i].indexOf(':') + 2);
 
+        const importance = patternQualities[i] >= THRESHOLDS.CLUSTER_QUALITY_STRONG ? 0.8 : 0.6;
         const record = makeMemoryRecord('pattern', content, ['auto-pattern'], {
           title,
-          importance: 0.8,
+          importance,
           context: 'auto-consolidation',
         });
         record.embedding = embeddingToBuffer(emb);

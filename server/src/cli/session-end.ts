@@ -5,6 +5,7 @@ import type { HookInput, HookOutput } from './types.js';
 import { parseTranscript, type BashCategory, type TranscriptSummary } from './transcript.js';
 import { makeMemoryRecord, derivePatternTitle } from './shared.js';
 import { safeParseTags } from '../merge-utils.js';
+import { THRESHOLDS } from '../thresholds.js';
 
 export const SUBSTANCE_THRESHOLD = 4;
 
@@ -146,7 +147,7 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
     const emb = embeddings[i];
 
     if (emb) {
-      const similar = db.findSimilarMemory(emb, 0.07, record.type as MemoryType);
+      const similar = db.findSimilarMemory(emb, THRESHOLDS.EPISODIC_DEDUP, record.type as MemoryType);
       if (similar) continue;
     }
 
@@ -324,7 +325,7 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
       if (assigned.has(j)) continue;
       const embJ = bufferToEmbedding(clusterCandidates[j].embedding);
       const similarity = cosineSimilarity(embI, embJ);
-      if (similarity >= 0.4 && similarity <= 0.95) {
+      if (similarity >= THRESHOLDS.CLUSTER_MIN && similarity <= THRESHOLDS.CLUSTER_MAX) {
         cluster.push(j);
         assigned.add(j);
       }
@@ -359,7 +360,7 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
     for (const pat of existingPatterns) {
       const patEmb = bufferToEmbedding(pat.embedding);
       const sim = cosineSimilarity(centroid, patEmb);
-      if (sim > 0.5) {
+      if (sim > THRESHOLDS.PATTERN_OVERLAP) {
         covered = true;
         break;
       }
@@ -387,7 +388,7 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
     const emb = patternEmbeddings[i];
     if (!emb) continue;
 
-    const similar = db.findSimilarMemory(emb, 0.05);
+    const similar = db.findSimilarMemory(emb, THRESHOLDS.EXACT_DUPLICATE);
     if (similar) continue;
 
     const taskDescriptions = patternData[i].memberIds
@@ -399,9 +400,10 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
     const title = derivePatternTitle(taskDescriptions);
     const content = patternTexts[i].slice(patternTexts[i].indexOf(':') + 2);
 
+    const importance = patternData[i].quality >= THRESHOLDS.CLUSTER_QUALITY_STRONG ? 0.8 : 0.6;
     const record = makeMemoryRecord('pattern', content, ['auto-pattern'], {
       title,
-      importance: 0.8,
+      importance,
       context: 'auto-consolidation',
     });
     record.embedding = embeddingToBuffer(emb);

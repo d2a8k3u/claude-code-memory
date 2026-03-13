@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MemoryRow, Relation, MemoryType, RelationType } from './types.js';
 import { embeddingToBuffer, bufferToEmbedding } from './embeddings.js';
+import { THRESHOLDS } from './thresholds.js';
 
 const SCHEMA_VERSION = 1;
 
@@ -580,14 +581,14 @@ export class MemoryDatabase {
       .all(embedding, limit + 5) as { id: string; distance: number; vec_rowid: number }[];
 
     return rows
-      .filter((r) => r.distance >= 0.05 && r.distance < 0.35)
+      .filter((r) => r.distance >= THRESHOLDS.EXACT_DUPLICATE && r.distance < THRESHOLDS.RELATED_UPPER)
       .slice(0, limit)
       .map(({ id, distance }) => ({ id, distance }));
   }
 
   findSimilarMemory(
     embedding: Float32Array,
-    threshold = 0.05,
+    threshold: number = THRESHOLDS.EXACT_DUPLICATE,
     type?: MemoryType,
   ): { id: string; distance: number } | null {
     const sql = type
@@ -904,7 +905,7 @@ export class MemoryDatabase {
 
       for (const n of neighbors) {
         if (n.id === row.id) continue;
-        if (n.distance >= 0.05 && n.distance < 0.1) {
+        if (n.distance >= THRESHOLDS.EXACT_DUPLICATE && n.distance < THRESHOLDS.NEAR_DUPLICATE) {
           const pairKey = [row.id, n.id].sort().join(':');
           if (!seenPairs.has(pairKey)) {
             seenPairs.add(pairKey);

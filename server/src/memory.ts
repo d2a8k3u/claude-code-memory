@@ -7,6 +7,7 @@ import { rerankResults, overfetchLimit, isRerankerAvailable } from './reranker.j
 import { rowToMemory, type Memory, type MemoryType, type RelationType } from './types.js';
 import { splitByTopics, insertSplitSections } from './topic-splitter.js';
 import { normalizeTags, safeParseTags, buildMergeUpdates } from './merge-utils.js';
+import { THRESHOLDS } from './thresholds.js';
 
 export { buildMergeUpdates, normalizeTags, safeParseTags, type MergeInput } from './merge-utils.js';
 
@@ -231,7 +232,7 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
   }
 
   if (embedding) {
-    const similar = db.findSimilarMemory(embedding, 0.05, memType as MemoryType);
+    const similar = db.findSimilarMemory(embedding, THRESHOLDS.EXACT_DUPLICATE, memType as MemoryType);
     if (similar) {
       const existing = db.getMemoryByIdRaw(similar.id);
       if (existing) {
@@ -500,7 +501,7 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
 
     // Dedup pass 1: within-batch
     if (emb) {
-      const withinBatchDup = acceptedEmbeddings.find((a) => 1 - cosineSimilarity(a.embedding, emb) < 0.05);
+      const withinBatchDup = acceptedEmbeddings.find((a) => 1 - cosineSimilarity(a.embedding, emb) < THRESHOLDS.EXACT_DUPLICATE);
       if (withinBatchDup) {
         const existing = db.getMemoryByIdRaw(withinBatchDup.id);
         if (existing) {
@@ -524,7 +525,7 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
         continue;
       }
 
-      const dbDup = db.findSimilarMemory(emb, 0.05, item.type as MemoryType);
+      const dbDup = db.findSimilarMemory(emb, THRESHOLDS.EXACT_DUPLICATE, item.type as MemoryType);
       if (dbDup) {
         const existing = db.getMemoryByIdRaw(dbDup.id);
         if (existing) {

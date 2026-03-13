@@ -3,6 +3,7 @@ import type { MemoryDatabase } from './database.js';
 import type { MemoryRow, MemoryType, RelationType } from './types.js';
 import { generateEmbeddings } from './embeddings.js';
 import { buildMergeUpdates, normalizeTags } from './merge-utils.js';
+import { THRESHOLDS } from './thresholds.js';
 
 export type Section = {
   title: string;
@@ -135,7 +136,7 @@ export async function insertSplitSections(
     const emb = embeddings[i];
 
     if (emb) {
-      const similar = db.findSimilarMemory(emb, 0.05, meta.type);
+      const similar = db.findSimilarMemory(emb, THRESHOLDS.EXACT_DUPLICATE, meta.type);
       if (similar) {
         const existing = db.getMemoryByIdRaw(similar.id);
         if (existing) {
