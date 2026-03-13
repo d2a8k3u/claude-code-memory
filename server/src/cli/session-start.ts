@@ -14,10 +14,12 @@ import { makeMemoryRecord, derivePatternTitle } from './shared.js';
 import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
 import { safeParseTags } from '../merge-utils.js';
 import { THRESHOLDS } from '../thresholds.js';
+import type { ScoringWeights } from '../thresholds.js';
 
 interface SearchChannel {
   query: string;
   weight: number;
+  scoringWeights?: ScoringWeights;
 }
 
 export const CONTEXT_BUDGET = {
@@ -105,8 +107,10 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   db.setSessionMeta('session_count', String(sessionCount));
 
   const channels: SearchChannel[] = [];
-  if (signals.cwd.length > 0) channels.push({ query: signals.cwd.join(' '), weight: 1.0 });
-  if (signals.branch.length > 0) channels.push({ query: signals.branch.join(' '), weight: 1.0 });
+  if (signals.cwd.length > 0)
+    channels.push({ query: signals.cwd.join(' '), weight: 1.0, scoringWeights: THRESHOLDS.SCORING_WEIGHTS_CWD });
+  if (signals.branch.length > 0)
+    channels.push({ query: signals.branch.join(' '), weight: 1.0, scoringWeights: THRESHOLDS.SCORING_WEIGHTS_BRANCH });
   if (signals.commitMessages.length > 0) channels.push({ query: signals.commitMessages.join('. '), weight: 0.8 });
   if (signals.files.length > 0) channels.push({ query: signals.files.slice(0, 8).join(' '), weight: 0.8 });
 
@@ -156,7 +160,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     for (let i = 0; i < channels.length; i++) {
       const channel = channels[i];
       const embedding = channelEmbeddings[i] ?? null;
-      const results = db.hybridSearchMemories(channel.query, embedding, 10, sessionFilter);
+      const results = db.hybridSearchMemories(channel.query, embedding, 10, sessionFilter, channel.scoringWeights);
 
       for (const result of results) {
         const weightedScore = channel.weight * result.score;
