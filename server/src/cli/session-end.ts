@@ -1,6 +1,12 @@
 import type { MemoryDatabase } from '../database.js';
 import type { MemoryRow, MemoryType } from '../types.js';
-import { generateEmbedding, generateEmbeddings, embeddingToBuffer, cosineSimilarity, bufferToEmbedding } from '../embeddings.js';
+import {
+  generateEmbedding,
+  generateEmbeddings,
+  embeddingToBuffer,
+  cosineSimilarity,
+  bufferToEmbedding,
+} from '../embeddings.js';
 import type { HookInput, HookOutput } from './types.js';
 import { parseTranscript, type BashCategory, type TranscriptSummary } from './transcript.js';
 import { makeMemoryRecord, derivePatternTitle } from './shared.js';
@@ -53,7 +59,9 @@ export function formatItemsWithCounts(items: ItemWithCount[]): string {
   return items.map((i) => `${i.name}(${i.count})`).join(', ');
 }
 
-export function computeSubstanceScore(summary: Pick<TranscriptSummary, 'toolsUsed' | 'filesModified' | 'errorCount' | 'memoryStores' | 'bashCommands'>): number {
+export function computeSubstanceScore(
+  summary: Pick<TranscriptSummary, 'toolsUsed' | 'filesModified' | 'errorCount' | 'memoryStores' | 'bashCommands'>,
+): number {
   return (
     summary.toolsUsed.length * 2 +
     summary.filesModified.length * 3 +
@@ -217,11 +225,7 @@ async function mergeOrCreateSemantic(
   db.insertMemory(record);
 }
 
-async function updateOrCreateProcedural(
-  db: MemoryDatabase,
-  content: string,
-  category: BashCategory,
-): Promise<void> {
+async function updateOrCreateProcedural(db: MemoryDatabase, content: string, category: BashCategory): Promise<void> {
   const existing = db.findMemoryByTag('procedural', category);
   if (existing) {
     const existingCmds = parseWorkflowCommands(existing.content);
@@ -339,15 +343,26 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
   if (clusters.length === 0) return;
 
   const patternTexts: string[] = [];
-  const patternData: { memberIds: string[]; clusterIdx: number }[] = [];
+  const patternData: { memberIds: string[]; clusterIdx: number; quality: number }[] = [];
 
   for (let ci = 0; ci < clusters.length; ci++) {
     const cluster = clusters[ci];
+    const clusterEmbs = cluster.map((idx) => bufferToEmbedding(clusterCandidates[idx].embedding));
+
+    let pairSum = 0;
+    let pairCount = 0;
+    for (let a = 0; a < clusterEmbs.length; a++) {
+      for (let b = a + 1; b < clusterEmbs.length; b++) {
+        pairSum += cosineSimilarity(clusterEmbs[a], clusterEmbs[b]);
+        pairCount++;
+      }
+    }
+    const avgSimilarity = pairCount > 0 ? pairSum / pairCount : 0;
+    if (avgSimilarity < THRESHOLDS.CLUSTER_QUALITY_MIN) continue;
 
     const dim = 384;
     const centroid = new Float32Array(dim);
-    for (const idx of cluster) {
-      const emb = bufferToEmbedding(clusterCandidates[idx].embedding);
+    for (const emb of clusterEmbs) {
       for (let d = 0; d < dim; d++) centroid[d] += emb[d];
     }
     for (let d = 0; d < dim; d++) centroid[d] /= cluster.length;
@@ -377,6 +392,7 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
     patternData.push({
       memberIds: cluster.map((idx) => clusterCandidates[idx].id),
       clusterIdx: ci,
+      quality: avgSimilarity,
     });
   }
 
