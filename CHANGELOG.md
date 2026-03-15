@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-03-15
+
+### Added
+
+- **Adaptive context budget allocation** — replaces fixed per-section caps with a two-phase system: phase 1 fills per-section minimums, phase 2 pools remaining candidates by quality score. Total budget of 25 items is distributed dynamically based on available high-quality results.
+- **Centralized threshold configuration** (`thresholds.ts`) — all similarity thresholds, scoring weights, decay parameters, and archival criteria in a single source of truth. Replaces magic numbers scattered across 6+ files.
+- **Shared pattern detector** (`pattern-detector.ts`) — extracted clustering logic from both session-start and session-end into a single module. Includes cluster quality scoring (minimum intra-cluster similarity 0.55).
+- **Per-channel scoring weight presets** — search channels can specify custom scoring weights. Branch queries favor recency (`textScore: 0.4, recency: 0.35`), CWD queries favor importance (`importance: 0.3`).
+- **Two-phase recency scoring** — steep decay for days 0–7 (strongly favors recent work), gradual exponential decay for 7+ days (τ=120). Replaces the uniform `exp(-age/90)` curve.
+- **Content-length penalty** — memories longer than 500 characters receive a score penalty (up to -0.15), preventing verbose generic memories from dominating results.
+- **Noise tool filtering** — transcript processing now filters out trivial tool calls (Read, Glob, Grep, Bash ls/cat) when assessing session substance.
+- **Task deduplication** — session-end deduplicates near-identical task summaries before creating episodic records.
+- **Commit message extraction** — git signal extraction now preserves full commit messages as search queries instead of splitting into individual words.
+- **Activity-weighted consolidation trigger** — consolidation now triggers based on cumulative session weight (tool calls, file modifications, memory operations) instead of raw session count. Fallback to every 20 sessions if weight tracking is unavailable.
+- **Memory metrics in health** — `memory_health` now reports injection counts, scoring distribution, and embedding coverage statistics.
+
+### Changed
+
+- **Removed importance auto-boost** — search hits and merges no longer inflate importance. Importance now reflects stored value only and decays naturally. Fixes the positive feedback loop where generic memories monotonically climbed toward the 0.95 cap.
+- **Tightened episodic dedup** — threshold changed from 0.10 to 0.08 cosine distance, matching the consolidation merge threshold.
+- **Tightened pattern clustering** — similarity window narrowed from 0.40–0.95 to 0.50–0.85. Clusters must meet minimum quality (avg similarity > 0.55). Weak clusters produce lower-importance patterns.
+- **More aggressive episodic archival** — age threshold reduced from 90 to 60 days, importance threshold from 0.7 to 0.4, access threshold from 3 to 1.
+- **Session-end substance scoring** — sessions with < 3 non-trivial tool calls and no file modifications are skipped for episodic creation. Reduces low-value records like "Task: Hello".
+- **Skills consolidated** — `memory-cleanup` and `memory-reorganize` merged into a single `/memory-maintain` skill covering deduplication, consolidation, junk cleanup, and memory splitting.
+- Tests increased from 223 to 336 — new coverage for budget allocation, pattern detection, noise filtering, scoring weights, and recency curves.
+
+### Removed
+
+- `memory-cleanup` skill (merged into `memory-maintain`)
+- `memory-reorganize` skill (merged into `memory-maintain`)
+- Importance auto-boost on search hits (+0.02) and merges (+0.05)
+
 ## [1.0.0] - 2026-03-06
 
 ### Added
@@ -108,6 +140,7 @@ Initial release of claude-code-memory.
 - Install script with MCP server registration, skills, hooks, and permissions setup
 - MIT license
 
+[1.1.0]: https://github.com/d2a8k3u/claude-code-memory/releases/tag/v1.1.0
 [1.0.0]: https://github.com/d2a8k3u/claude-code-memory/releases/tag/v1.0.0
 [0.2.0]: https://github.com/d2a8k3u/claude-code-memory/releases/tag/v0.2.0
 [0.1.3]: https://github.com/d2a8k3u/claude-code-memory/releases/tag/v0.1.3
