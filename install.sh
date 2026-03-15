@@ -242,14 +242,18 @@ Auto-save covers routine facts. Use \`memory_store\` manually for insights autom
 - User preferences or project-specific conventions
 - Corrections to auto-created memories
 
-### Rules
+### Writing good memories
 
-- **Always write memory content and titles in English**, even if the user communicates in another language. Translate if needed. This ensures consistent search and retrieval across sessions.
-- Search before storing to avoid duplicates
-- Be concise: 1-3 sentences per memory
-- Use lowercase hyphenated tags
-- Don't store trivial actions (simple reads, ls commands)
-- Don't ask the user before saving — just do it silently
+- **Always write content and titles in English**, even if the user communicates in another language. This ensures consistent search and retrieval.
+- **One topic per memory.** If you have insights about 3 different things, call \`memory_store\` 3 times. Multi-topic memories are harder to search and retrieve.
+- **Lead with the insight or fact, not the backstory.** Write \"The FTS5 index requires porter tokenizer for stemmed search\" — not \"During today's session I discovered that the FTS5 index...\".
+- **Make content searchable.** Use the specific terms someone would search for later — module names, error messages, tool names, file paths.
+- **Don't paste raw data — summarize and reference.** Instead of dumping a config file or log output, describe what matters and note where to find the full source.
+- **Include reasoning for decisions.** \"Chose SQLite over Postgres because the plugin runs per-project with no daemon\" is more useful than \"Uses SQLite\".
+- Search before storing to avoid duplicates.
+- Use lowercase hyphenated tags for categorization.
+- Don't store trivial actions (simple reads, ls commands).
+- Don't ask the user before saving — just do it silently.
 $MARKER_END"
 
 mkdir -p "$(dirname "$CLAUDE_MD")"
