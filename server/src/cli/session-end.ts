@@ -12,6 +12,7 @@ import { parseTranscript, type BashCategory, type TranscriptSummary } from './tr
 import { makeMemoryRecord, derivePatternTitle } from './shared.js';
 import { safeParseTags } from '../merge-utils.js';
 import { THRESHOLDS } from '../thresholds.js';
+import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
 
 export const SUBSTANCE_THRESHOLD = 4;
 
@@ -159,7 +160,16 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
       if (similar) continue;
     }
 
-    db.insertMemory(record);
+    const splitResult = splitByTopics(record.content);
+    if (splitResult.shouldSplit && splitResult.sections) {
+      await insertSplitSections(db, splitResult.sections, {
+        type: record.type as MemoryType,
+        context: record.context ?? undefined,
+        tags: safeParseTags(record.tags),
+      });
+    } else {
+      db.insertMemory(record);
+    }
   }
 
   await detectAndCreatePatterns(db);
@@ -303,6 +313,19 @@ function extractTaskFromEpisodic(content: string): string {
   return taskMatch ? taskMatch[1].trim() : content.slice(0, 100);
 }
 
+export function deduplicateTaskDescriptions(tasks: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const task of tasks) {
+    const normalized = task.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      unique.push(task);
+    }
+  }
+  return unique;
+}
+
 async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
   const recentEpisodics = db.getRecentEpisodicWithEmbeddings(30, 50);
 
@@ -343,7 +366,7 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
   if (clusters.length === 0) return;
 
   const patternTexts: string[] = [];
-  const patternData: { memberIds: string[]; clusterIdx: number; quality: number }[] = [];
+  const patternData: { memberIds: string[]; clusterIdx: number; quality: number; content: string }[] = [];
 
   for (let ci = 0; ci < clusters.length; ci++) {
     const cluster = clusters[ci];
@@ -386,13 +409,15 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
       .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
       .filter((t) => t.length > 0);
     const title = derivePatternTitle(taskDescriptions);
-    const content = `Recurring theme across ${cluster.length} sessions: ${taskDescriptions.join(' | ')}`;
+    const uniqueTasks = deduplicateTaskDescriptions(taskDescriptions);
+    const content = `Recurring theme across ${cluster.length} sessions.\n\n**Representative tasks:**\n${uniqueTasks.map((t) => `- ${t}`).join('\n')}`;
 
     patternTexts.push(`${title}: ${content}`);
     patternData.push({
       memberIds: cluster.map((idx) => clusterCandidates[idx].id),
       clusterIdx: ci,
       quality: avgSimilarity,
+      content,
     });
   }
 
@@ -414,7 +439,7 @@ async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
       })
       .filter((t) => t.length > 0);
     const title = derivePatternTitle(taskDescriptions);
-    const content = patternTexts[i].slice(patternTexts[i].indexOf(':') + 2);
+    const content = patternData[i].content;
 
     const importance = patternData[i].quality >= THRESHOLDS.CLUSTER_QUALITY_STRONG ? 0.8 : 0.6;
     const record = makeMemoryRecord('pattern', content, ['auto-pattern'], {
