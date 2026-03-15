@@ -22,6 +22,11 @@ export interface TranscriptSummary {
 }
 
 const READ_ONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch']);
+const NOISE_TOOL_PREFIXES = ['mcp__claude-memory__'];
+
+function isNoiseTool(name: string): boolean {
+  return READ_ONLY_TOOLS.has(name) || NOISE_TOOL_PREFIXES.some((p) => name.startsWith(p));
+}
 
 const CATEGORY_PATTERNS: [BashCategory, RegExp][] = [
   ['test', /\b(jest|vitest|mocha|pytest|cargo\s+test|go\s+test|npm\s+test|npx\s+test|node\s+--test)\b/],
@@ -144,7 +149,7 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
       }>) {
         if (block.type === 'tool_use') {
           const name = block.name;
-          if (name && !READ_ONLY_TOOLS.has(name)) {
+          if (name && !isNoiseTool(name)) {
             toolsUsed.add(name);
             result.toolCallCount++;
           }
