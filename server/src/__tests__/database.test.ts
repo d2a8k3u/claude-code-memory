@@ -210,6 +210,34 @@ describe('MemoryDatabase - access tracking', () => {
   });
 });
 
+describe('MemoryDatabase - injection tracking', () => {
+  it('increments injection_count for specified IDs', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'first' }));
+    db.insertMemory(makeMemoryRow({ id: 'mem2', content: 'second' }));
+    db.insertMemory(makeMemoryRow({ id: 'mem3', content: 'third' }));
+
+    db.incrementInjectionCount(['mem1', 'mem2']);
+    db.incrementInjectionCount(['mem1']);
+
+    const m1 = db.getMemoryByIdRaw('mem1');
+    const m2 = db.getMemoryByIdRaw('mem2');
+    const m3 = db.getMemoryByIdRaw('mem3');
+    assert.ok(m1 && m2 && m3);
+    assert.equal(m1.injection_count, 2);
+    assert.equal(m2.injection_count, 1);
+    assert.equal(m3.injection_count, 0);
+
+    cleanup(db, dir);
+  });
+
+  it('handles empty ID array gracefully', () => {
+    const { db, dir } = makeTempDb();
+    db.incrementInjectionCount([]);
+    cleanup(db, dir);
+  });
+});
+
 // ==========================================================
 // Pagination
 // ==========================================================
@@ -1178,7 +1206,7 @@ describe('MemoryDatabase - episodic cleanup', () => {
       }),
     );
 
-    const cleaned = db.cleanupOldEpisodicMemories(90);
+    const cleaned = db.cleanupOldEpisodicMemories(60);
     assert.equal(cleaned, 1);
     assert.equal(db.getMemoryById('old-low'), null);
     assert.ok(db.getMemoryById('old-important'));
@@ -1198,7 +1226,7 @@ describe('MemoryDatabase - episodic cleanup', () => {
       }),
     );
 
-    const cleaned = db.cleanupOldEpisodicMemories(90);
+    const cleaned = db.cleanupOldEpisodicMemories(60);
     assert.equal(cleaned, 0);
     cleanup(db, dir);
   });
@@ -1704,6 +1732,31 @@ describe('MemoryDatabase - getHealthStats', () => {
 
     const stats = db.getHealthStats();
     assert.equal(stats.staleCount, 1);
+
+    cleanup(db, dir);
+  });
+
+  it('reports quality metrics including injection stats', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(makeMemoryRow({ id: 'm1', content: 'a', importance: 0.2, created_at: oldDate, updated_at: oldDate }));
+    db.insertMemory(makeMemoryRow({ id: 'm2', content: 'b', importance: 0.5 }));
+    db.insertMemory(makeMemoryRow({ id: 'm3', content: 'c', importance: 0.9 }));
+
+    db.incrementInjectionCount(['m1', 'm2']);
+    db.incrementInjectionCount(['m1']);
+    db.getMemoryById('m2'); // increment access_count
+
+    const stats = db.getHealthStats();
+    assert.equal(stats.qualityMetrics.injectionStats.totalInjections, 3);
+    assert.equal(stats.qualityMetrics.injectionStats.topInjected, 2);
+    assert.ok(stats.qualityMetrics.accessedRatio > 0);
+    assert.ok(stats.qualityMetrics.avgImportance > 0);
+    assert.ok(stats.qualityMetrics.importanceDistribution.low >= 1);
+    assert.ok(stats.qualityMetrics.importanceDistribution.high >= 1);
+    // m1 is old but WAS injected; m2/m3 are recent (<7d). So neverInjected = 0
+    assert.equal(stats.qualityMetrics.injectionStats.neverInjected, 0);
 
     cleanup(db, dir);
   });

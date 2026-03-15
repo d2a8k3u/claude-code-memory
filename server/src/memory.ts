@@ -272,6 +272,7 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
     updated_at: now,
     access_count: 0,
     last_accessed: null,
+    injection_count: 0,
   });
 
   let embeddingStatus = 'none';
@@ -571,6 +572,7 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
       updated_at: now,
       access_count: 0,
       last_accessed: null,
+      injection_count: 0,
     });
 
     if (emb) {
@@ -718,7 +720,14 @@ ${typeLines}
 ## Session Info
 - **Session count:** ${stats.sessionCount}
 - **Last consolidation:** session #${stats.lastConsolidation}
-- **Sessions since consolidation:** ${stats.sessionCount - stats.lastConsolidation}`;
+- **Sessions since consolidation:** ${stats.sessionCount - stats.lastConsolidation}
+
+## Quality Metrics
+- **Accessed ratio:** ${stats.total > 0 ? (stats.qualityMetrics.accessedRatio * 100).toFixed(1) : '0'}% (${Math.round(stats.qualityMetrics.accessedRatio * stats.total)}/${stats.total})
+- **Avg importance:** ${stats.qualityMetrics.avgImportance.toFixed(2)}
+- **Importance distribution:** low(<0.3): ${stats.qualityMetrics.importanceDistribution.low ?? 0} | mid: ${stats.qualityMetrics.importanceDistribution.medium ?? 0} | high(>=0.7): ${stats.qualityMetrics.importanceDistribution.high ?? 0}
+- **Injections:** ${stats.qualityMetrics.injectionStats.totalInjections} total, avg ${stats.qualityMetrics.injectionStats.avgInjectionCount.toFixed(1)}/memory, max ${stats.qualityMetrics.injectionStats.topInjected}
+- **Never injected (>7d):** ${stats.qualityMetrics.injectionStats.neverInjected} memories`;
 
   return text(report);
 }
@@ -727,7 +736,7 @@ function formatMemory(m: Memory): string {
   const titleLine = m.title ? ` — ${m.title}` : '';
   const sourceLine = m.source ? ` | **Source:** ${m.source}` : '';
   return `**[${m.type}]** ${m.id}${titleLine}
-**Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Created:** ${m.created_at.slice(0, 10)}
+**Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Injected:** ${m.injection_count}x | **Created:** ${m.created_at.slice(0, 10)}
 **Tags:** ${m.tags.length > 0 ? m.tags.join(', ') : '(none)'}${sourceLine}
 ${m.context ? `**Context:** ${m.context}\n` : ''}
 ${m.content}`;
@@ -741,7 +750,7 @@ function formatScoredMemory(m: Memory, score: number, textScore?: number): strin
       ? `score: ${score.toFixed(3)} (text: ${textScore.toFixed(3)})`
       : `score: ${score.toFixed(3)}`;
   return `**[${m.type}]** ${m.id}${titleLine} — ${scoreInfo}
-**Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Created:** ${m.created_at.slice(0, 10)}
+**Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Injected:** ${m.injection_count}x | **Created:** ${m.created_at.slice(0, 10)}
 **Tags:** ${m.tags.length > 0 ? m.tags.join(', ') : '(none)'}${sourceLine}
 ${m.context ? `**Context:** ${m.context}\n` : ''}
 ${m.content}`;

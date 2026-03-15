@@ -183,9 +183,10 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     cleanup(db, dir);
   });
 
-  it('runs auto-consolidation after 10 sessions', async () => {
-    db.setSessionMeta('session_count', '9');
-    db.setSessionMeta('last_consolidation', '0');
+  it('runs auto-consolidation when accumulated weight exceeds threshold', async () => {
+    db.setSessionMeta('session_count', '5');
+    db.setSessionMeta('last_consolidation', '3');
+    db.setSessionMeta('consolidation_weight', '11.0');
 
     // Add some memories so consolidation has something to process
     seedMemory(db, 'sem-1', { type: 'semantic', content: 'fact one', importance: 0.5 }, 1);
@@ -195,18 +196,17 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     assert.ok(result.hookSpecificOutput);
     const ctx = result.hookSpecificOutput.additionalContext;
 
-    // Should NOT include old "Consolidation Due" prompt — consolidation is now automated
     assert.ok(!ctx.includes('Consolidation Due'), 'Should not show old consolidation prompt');
-    // Session count should be updated
-    assert.ok(ctx.includes('session #10'));
-    // last_consolidation should be updated
-    assert.equal(db.getSessionMeta('last_consolidation'), '10');
+    assert.ok(ctx.includes('session #6'));
+    assert.equal(db.getSessionMeta('last_consolidation'), '6');
+    assert.equal(db.getSessionMeta('consolidation_weight'), '0');
     cleanup(db, dir);
   });
 
   it('auto-consolidation deletes stale memories', async () => {
-    db.setSessionMeta('session_count', '9');
-    db.setSessionMeta('last_consolidation', '0');
+    db.setSessionMeta('session_count', '5');
+    db.setSessionMeta('last_consolidation', '3');
+    db.setSessionMeta('consolidation_weight', '15.0');
 
     const oldDate = new Date(Date.now() - 61 * 24 * 60 * 60 * 1000).toISOString();
     seedMemory(
@@ -280,9 +280,10 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     cleanup(db, dir);
   });
 
-  it('does not trigger consolidation before 10 sessions', async () => {
+  it('does not trigger consolidation when weight is below threshold', async () => {
     db.setSessionMeta('session_count', '3');
     db.setSessionMeta('last_consolidation', '0');
+    db.setSessionMeta('consolidation_weight', '2.5');
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     assert.ok(result.hookSpecificOutput);

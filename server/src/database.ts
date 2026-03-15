@@ -77,6 +77,15 @@ export class MemoryDatabase {
       // No migration — fresh start at v1
       this.db.prepare('UPDATE schema_version SET version = ?').run(SCHEMA_VERSION);
     }
+
+    this.addColumnIfMissing('memories', 'injection_count', 'INTEGER NOT NULL DEFAULT 0');
+  }
+
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const columns = this.db.pragma(`table_info(${table})`) as { name: string }[];
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   private createSchema(): void {
@@ -94,6 +103,7 @@ export class MemoryDatabase {
         updated_at TEXT NOT NULL,
         access_count INTEGER NOT NULL DEFAULT 0,
         last_accessed TEXT,
+        injection_count INTEGER NOT NULL DEFAULT 0,
         embedding BLOB
       );
 
@@ -232,6 +242,14 @@ export class MemoryDatabase {
       .prepare(`UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?`)
       .run(new Date().toISOString(), id);
     return row;
+  }
+
+  incrementInjectionCount(ids: string[]): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(',');
+    this.db
+      .prepare(`UPDATE memories SET injection_count = injection_count + 1 WHERE id IN (${placeholders})`)
+      .run(...ids);
   }
 
   deleteMemory(id: string): boolean {
@@ -527,7 +545,7 @@ export class MemoryDatabase {
     return tx();
   }
 
-  cleanupOldEpisodicMemories(maxAgeDays = 90): number {
+  cleanupOldEpisodicMemories(maxAgeDays = 60): number {
     const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
     const tx = this.db.transaction(() => {
       const targets = this.db
@@ -535,8 +553,8 @@ export class MemoryDatabase {
           `SELECT rowid, id FROM memories
            WHERE type = 'episodic'
              AND created_at < ?
-             AND importance < 0.7
-             AND access_count < 3`,
+             AND importance < 0.4
+             AND access_count < 1`,
         )
         .all(cutoff) as { rowid: number; id: string }[];
 
@@ -814,6 +832,17 @@ export class MemoryDatabase {
     ageDistribution: { last24h: number; last7d: number; last30d: number; older: number };
     sessionCount: number;
     lastConsolidation: number;
+    qualityMetrics: {
+      accessedRatio: number;
+      avgImportance: number;
+      importanceDistribution: { low: number; medium: number; high: number };
+      injectionStats: {
+        totalInjections: number;
+        neverInjected: number;
+        avgInjectionCount: number;
+        topInjected: number;
+      };
+    };
   } {
     const total = this.countMemories();
 
@@ -863,6 +892,45 @@ export class MemoryDatabase {
     const sessionCount = parseInt(this.getSessionMeta('session_count') ?? '0', 10);
     const lastConsolidation = parseInt(this.getSessionMeta('last_consolidation') ?? '0', 10);
 
+    // Quality metrics
+    const accessedCount = (
+      this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE access_count > 0').get() as { count: number }
+    ).count;
+    const accessedRatio = total > 0 ? accessedCount / total : 0;
+
+    const avgImportance = (
+      this.db.prepare('SELECT COALESCE(AVG(importance), 0) as avg FROM memories').get() as { avg: number }
+    ).avg;
+
+    const importanceDist = this.db
+      .prepare(
+        `SELECT
+          SUM(CASE WHEN importance < 0.3 THEN 1 ELSE 0 END) as low,
+          SUM(CASE WHEN importance >= 0.3 AND importance < 0.7 THEN 1 ELSE 0 END) as medium,
+          SUM(CASE WHEN importance >= 0.7 THEN 1 ELSE 0 END) as high
+        FROM memories`,
+      )
+      .get() as { low: number; medium: number; high: number };
+
+    const injectionAgg = this.db
+      .prepare(
+        `SELECT
+          COALESCE(SUM(injection_count), 0) as totalInjections,
+          COALESCE(AVG(injection_count), 0) as avgInjectionCount,
+          COALESCE(MAX(injection_count), 0) as topInjected
+        FROM memories`,
+      )
+      .get() as { totalInjections: number; avgInjectionCount: number; topInjected: number };
+
+    const neverInjected = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) as count FROM memories
+           WHERE injection_count = 0 AND created_at < ? AND type != 'working'`,
+        )
+        .get(d7d) as { count: number }
+    ).count;
+
     return {
       total,
       byType,
@@ -872,6 +940,17 @@ export class MemoryDatabase {
       ageDistribution: { last24h, last7d, last30d, older },
       sessionCount,
       lastConsolidation,
+      qualityMetrics: {
+        accessedRatio,
+        avgImportance,
+        importanceDistribution: importanceDist,
+        injectionStats: {
+          totalInjections: injectionAgg.totalInjections,
+          neverInjected,
+          avgInjectionCount: injectionAgg.avgInjectionCount,
+          topInjected: injectionAgg.topInjected,
+        },
+      },
     };
   }
 

@@ -23,6 +23,7 @@ function makeScoredRow(overrides: Partial<ScoredMemoryRow> & { id: string }): Sc
     updated_at: now,
     access_count: 0,
     last_accessed: null,
+    injection_count: 0,
     score: 0.5,
     textScore: 0.3,
     ...overrides,

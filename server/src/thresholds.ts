@@ -41,6 +41,20 @@ export const THRESHOLDS = {
   /** Characters of excess for penalty to reach ~63% of max */
   CONTENT_LENGTH_PENALTY_SCALE: 2000,
 
+  // --- Consolidation trigger ---
+  /** Cumulative session weight that triggers auto-consolidation */
+  CONSOLIDATION_WEIGHT_THRESHOLD: 10.0,
+  /** Fallback session count gap if weight tracking is unavailable */
+  CONSOLIDATION_SESSION_FALLBACK: 20,
+
+  // --- Episodic archival thresholds ---
+  /** Age in days after which low-value episodics are eligible for deletion */
+  EPISODIC_ARCHIVE_AGE_DAYS: 60,
+  /** Importance threshold — episodics below this are eligible for archival */
+  EPISODIC_ARCHIVE_MAX_IMPORTANCE: 0.4,
+  /** Access count threshold — only episodics accessed fewer times than this are eligible */
+  EPISODIC_ARCHIVE_MAX_ACCESS: 1,
+
   // --- Scoring weights ---
   /** Default scoring weights for hybridSearchMemories */
   SCORING_WEIGHTS: { textScore: 0.5, importance: 0.2, recency: 0.2, access: 0.1 },
