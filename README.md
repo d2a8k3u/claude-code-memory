@@ -8,7 +8,11 @@ A [Claude Code](https://claude.ai/download) plugin that gives Claude fully autom
 - **Auto-saves** a structured session summary when the session ends
 - **Auto-recalls** matching memories when Bash errors occur
 - **Auto-merges** near-duplicate memories on store (≥95% cosine similarity)
-- **Auto-consolidates** every 10 sessions — reviews duplicates, stale entries, and emerging patterns
+- **Auto-consolidates** based on activity weight — reviews duplicates, stale entries, and emerging patterns
+- **Adaptive context budget** — dynamically allocates injection slots based on result quality, not fixed caps
+- **Two-phase recency scoring** — strongly favors recent work (0–7 days) with gradual long-term decay
+- **Content-length penalty** — prevents verbose, generic memories from dominating search results
+- **Noise filtering** — suppresses trivial sessions, junk procedurals, and low-substance episodics
 
 All data stays local. Everything is scoped to the current project via the working directory.
 
@@ -37,10 +41,10 @@ Run `/memory-init` in any project to populate the memory from existing project f
 
 ### Session Lifecycle
 
-1. **SessionStart** — clears working memories, decays stale importance, injects relevant context from the memory DB
-2. **During session** — Claude uses 9 MCP tools automatically (store, search, get, update, delete, list, batch-store, relate, graph)
+1. **SessionStart** — clears working memories, decays stale importance, injects relevant context via adaptive budget allocation
+2. **During session** — Claude uses 10 MCP tools automatically (store, search, get, update, delete, list, batch-store, relate, graph, health)
 3. **PostToolUse** — on Bash errors, extracts error terms and surfaces matching memories
-4. **Stop** — analyzes the session transcript and saves a structured episodic summary
+4. **Stop** — analyzes the session transcript with noise filtering and saves structured memories (episodic, procedural, semantic, pattern)
 
 ### Memory Types
 
@@ -54,13 +58,22 @@ Run `/memory-init` in any project to populate the memory from existing project f
 
 Memories can be linked with relations: `relates_to`, `depends_on`, `contradicts`, `extends`, `implements`, `derived_from`.
 
-### Search
+### Search & Scoring
 
-Hybrid search combining FTS5 full-text and semantic vectors (cosine similarity via sqlite-vec). Falls back to text-only when embeddings are unavailable.
+Hybrid search combining FTS5 full-text and semantic vectors (cosine similarity via sqlite-vec). Falls back to text-only when embeddings are unavailable. Results are reranked with a cross-encoder (ms-marco-TinyBERT-L-2-v2) for accurate relevance scoring.
+
+Scoring combines text relevance, importance, recency, and access frequency with configurable per-channel weight presets (e.g. branch queries favor recency, project-level queries favor importance). Verbose memories receive a content-length penalty to keep results focused.
 
 ### Storage
 
 SQLite database at `.claude/memory-db/memory.sqlite` inside each project. Includes FTS5 and vec0 virtual tables for fast search.
+
+### Skills
+
+| Skill | Description |
+|-------|-------------|
+| `/memory-init` | Bootstrap project memory from codebase files (README, package.json, git history, etc.) |
+| `/memory-maintain` | Deduplicate, consolidate, clean junk records, and split large memories |
 
 <details>
 <summary>Architecture</summary>
@@ -72,10 +85,18 @@ claude-memory/
 │   ├── index.ts                  # MCP server entry point
 │   ├── cli.ts                    # Hook runner entry point
 │   ├── database.ts               # SQLite + FTS5 + vec0
-│   ├── memory.ts                 # 9 MCP tool handlers
+│   ├── memory.ts                 # 10 MCP tool handlers
 │   ├── embeddings.ts             # Local embeddings (all-MiniLM-L6-v2, 384-dim)
-│   └── cli/                      # Hook handlers (session-start, session-end, error-context)
-├── skills/memory-init/           # /memory-init bootstrap skill
+│   ├── thresholds.ts             # Centralized similarity/scoring configuration
+│   └── cli/
+│       ├── session-start.ts      # Budget allocation, context injection
+│       ├── session-end.ts        # Transcript analysis, memory creation
+│       ├── error-context.ts      # Error pattern matching
+│       ├── pattern-detector.ts   # Shared pattern clustering logic
+│       └── transcript.ts         # Transcript parsing with noise filtering
+├── skills/
+│   ├── memory-init/              # /memory-init bootstrap skill
+│   └── memory-maintain/          # /memory-maintain cleanup skill
 ├── agents/memory-curator.md      # Maintenance sub-agent
 └── hooks/hooks.json.template     # Reference hook config
 ```
