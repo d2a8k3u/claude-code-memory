@@ -13,6 +13,7 @@ import {
   parseItemsWithCounts,
   formatItemsWithCounts,
   SEMANTIC_SINGLETON_CAP,
+  deduplicateTaskDescriptions,
 } from '../cli/session-end.js';
 import { makeTempDb, cleanup } from './helpers.js';
 
@@ -906,6 +907,73 @@ describe('handleSessionEnd - semantic singleton merge', () => {
     // Old items should be parsed as count=1, node incremented to 1
     assert.ok(techStack.content.includes('node('), 'New item should have count format');
     assert.ok(techStack.content.includes('typescript('), 'Old items should be migrated to count format');
+
+    cleanup(db, dir);
+  });
+});
+
+describe('deduplicateTaskDescriptions', () => {
+  it('removes exact duplicates preserving first occurrence', () => {
+    assert.deepEqual(deduplicateTaskDescriptions(['Fix auth bug', 'Fix auth bug', 'Add tests']), [
+      'Fix auth bug',
+      'Add tests',
+    ]);
+  });
+
+  it('removes case-insensitive duplicates preserving original casing', () => {
+    assert.deepEqual(deduplicateTaskDescriptions(['Fix Auth Bug', 'fix auth bug', 'Add Tests']), [
+      'Fix Auth Bug',
+      'Add Tests',
+    ]);
+  });
+
+  it('normalizes whitespace for comparison', () => {
+    assert.deepEqual(deduplicateTaskDescriptions(['Fix  auth   bug', 'Fix auth bug']), ['Fix  auth   bug']);
+  });
+
+  it('returns empty array for empty input', () => {
+    assert.deepEqual(deduplicateTaskDescriptions([]), []);
+  });
+
+  it('preserves all items when no duplicates exist', () => {
+    const tasks = ['Fix auth', 'Add tests', 'Update docs'];
+    assert.deepEqual(deduplicateTaskDescriptions(tasks), tasks);
+  });
+});
+
+describe('handleSessionEnd - noise tool filtering', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+  });
+
+  it('excludes memory MCP tools from episodic tools list', async () => {
+    const transcriptPath = writeTranscript(dir, [
+      { role: 'user', content: 'Search memory and fix the authentication module bug' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', name: 'mcp__claude-memory__memory_search', input: { query: 'auth' } },
+          { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } },
+          {
+            type: 'tool_use',
+            name: 'Edit',
+            input: { file_path: '/src/auth.ts', old_string: 'a', new_string: 'b' },
+          },
+        ],
+      },
+    ]);
+
+    await handleSessionEnd(db, { transcript_path: transcriptPath, cwd: dir });
+
+    const memories = db.listMemories('episodic', 10, 0);
+    const main = memories.find((m) => JSON.parse(m.tags).includes('session-end'));
+    assert.ok(main, 'Should create episodic record');
+    assert.ok(main.content.includes('Bash'), 'Should include Bash in tools');
+    assert.ok(main.content.includes('Edit'), 'Should include Edit in tools');
+    assert.ok(!main.content.includes('mcp__claude-memory'), 'Should exclude memory MCP tools');
 
     cleanup(db, dir);
   });
