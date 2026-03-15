@@ -1,10 +1,86 @@
 import type { MemoryDatabase } from '../database.js';
 import type { MemoryRow, MemoryType } from '../types.js';
-import { generateEmbedding, generateEmbeddings, embeddingToBuffer, cosineSimilarity, bufferToEmbedding } from '../embeddings.js';
+import { generateEmbedding, generateEmbeddings, embeddingToBuffer } from '../embeddings.js';
 import type { HookInput, HookOutput } from './types.js';
-import { parseTranscript, type BashCategory } from './transcript.js';
-import { makeMemoryRecord, derivePatternTitle } from './shared.js';
+import { parseTranscript, type BashCategory, type TranscriptSummary } from './transcript.js';
+import { makeMemoryRecord } from './shared.js';
 import { safeParseTags } from '../merge-utils.js';
+import { THRESHOLDS } from '../thresholds.js';
+import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
+import { detectAndStorePatterns } from './pattern-detector.js';
+
+export { deduplicateTaskDescriptions, extractTaskFromEpisodic } from './pattern-detector.js';
+
+export const SUBSTANCE_THRESHOLD = 4;
+
+const TRIVIAL_COMMAND_PATTERNS = [
+  /^(echo|cat|ls|pwd|cd|which|whoami|date|env)\b/,
+  /^git\s+(status|log|diff|show|branch|remote|stash\s+list)\b/,
+  /^(head|tail|wc|sort|uniq|tr|cut)\b/,
+];
+
+export function isTrivialCommand(command: string): boolean {
+  const trimmed = command.trim();
+  return TRIVIAL_COMMAND_PATTERNS.some((p) => p.test(trimmed));
+}
+
+export function parseWorkflowCommands(content: string): string[] {
+  const colonIdx = content.indexOf(':');
+  if (colonIdx === -1) return [];
+  return content
+    .slice(colonIdx + 1)
+    .split(' && ')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export const SEMANTIC_SINGLETON_CAP = 15;
+
+export type ItemWithCount = { name: string; count: number };
+
+export function parseItemsWithCounts(content: string): ItemWithCount[] {
+  const colonIdx = content.indexOf(':');
+  if (colonIdx === -1) return [];
+  return content
+    .slice(colonIdx + 1)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const match = item.match(/^(.+?)\((\d+)\)$/);
+      if (match) return { name: match[1].trim(), count: parseInt(match[2], 10) };
+      return { name: item.trim(), count: 1 };
+    });
+}
+
+export function formatItemsWithCounts(items: ItemWithCount[]): string {
+  return items.map((i) => `${i.name}(${i.count})`).join(', ');
+}
+
+export function computeSessionWeight(summary: TranscriptSummary): number {
+  const toolWeight = Math.min(summary.toolCallCount, 20) * 0.1;
+  const fileWeight = Math.min(summary.filesModified.length, 10) * 0.3;
+  const memWeight = (summary.memorySearches + summary.memoryStores) * 0.1;
+  const errorWeight = Math.min(summary.errorCount, 5) * 0.1;
+  const bashWeight =
+    Math.min(
+      summary.bashCommands.filter((c) => !isTrivialCommand(c.command)).length,
+      10,
+    ) * 0.1;
+  return toolWeight + fileWeight + memWeight + errorWeight + bashWeight;
+}
+
+export function computeSubstanceScore(
+  summary: Pick<TranscriptSummary, 'toolsUsed' | 'filesModified' | 'errorCount' | 'memoryStores' | 'bashCommands'>,
+): number {
+  return (
+    summary.toolsUsed.length * 2 +
+    summary.filesModified.length * 3 +
+    (summary.errorCount > 0 ? 2 : 0) +
+    summary.memoryStores +
+    Math.min(summary.bashCommands.filter((c) => !isTrivialCommand(c.command)).length, 5)
+  );
+}
 
 export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Promise<HookOutput> {
   const cwd = input.cwd ?? process.cwd();
@@ -13,6 +89,7 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
   const episodicRecords: (MemoryRow & { embedding?: Buffer | null })[] = [];
   const embeddingTexts: string[] = [];
 
+  // Build unified episodic record (files + errors merged into main)
   const mainParts: string[] = [];
   const taskSummary = summary.taskSummary ?? '';
   if (taskSummary) mainParts.push(`**Task:** ${taskSummary}`);
@@ -20,43 +97,34 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
   if (summary.memorySearches > 0 || summary.memoryStores > 0) {
     mainParts.push(`**Memory ops:** ${summary.memorySearches} searches, ${summary.memoryStores} stores`);
   }
+  if (summary.filesModified.length > 0) {
+    mainParts.push(`**Files modified:** ${summary.filesModified.join(', ')}`);
+  }
+  if (summary.errorCount > 0) {
+    mainParts.push(`**Errors:** ${summary.errorCount} errors during session`);
+  }
 
-  if (mainParts.length === 0 && summary.filesModified.length === 0 && summary.errorCount === 0) {
+  if (mainParts.length === 0) {
     return { ok: true };
   }
 
-  // Step 2: Filter meaningless episodic records
-  const isMeaningless =
-    taskSummary.length < 15 || taskSummary.startsWith('[Request interrupted');
-  const hasSubstance =
-    summary.toolsUsed.length > 0 ||
-    summary.memorySearches > 0 ||
-    summary.memoryStores > 0;
+  const isInterrupted = taskSummary.startsWith('[Request interrupted');
+  const isShortTask = taskSummary.length < 30;
+  const substanceScore = computeSubstanceScore(summary);
+  const hasSubstance = substanceScore >= SUBSTANCE_THRESHOLD;
+  const isTrivial = summary.toolCallCount < 3 && summary.filesModified.length === 0;
 
-  if (mainParts.length > 0 && !(isMeaningless && !hasSubstance)) {
+  if (!isInterrupted && !(isShortTask && (!hasSubstance || isTrivial))) {
     const mainContent = mainParts.join('\n');
     episodicRecords.push(makeMemoryRecord('episodic', mainContent, ['auto-save', 'session-end']));
     embeddingTexts.push(mainContent);
-  }
-
-  if (summary.filesModified.length > 0) {
-    const filesContent = `**Files modified:** ${summary.filesModified.join(', ')}`;
-    episodicRecords.push(makeMemoryRecord('episodic', filesContent, ['auto-save', 'session-files']));
-    embeddingTexts.push(filesContent);
-  }
-
-  if (summary.errorCount > 0) {
-    const taskContext = taskSummary ? ` during: ${taskSummary}` : '';
-    const errorsContent = `**Errors encountered:** ${summary.errorCount} errors during session${taskContext}`;
-    episodicRecords.push(makeMemoryRecord('episodic', errorsContent, ['auto-save', 'session-errors']));
-    embeddingTexts.push(errorsContent);
   }
 
   // Handle singleton records by tag-based lookup (one per category, updated in place)
   const successfulByCategory = groupSuccessfulCommands(summary.bashCommands);
 
   for (const [category, commands] of successfulByCategory) {
-    if (commands.length < 2) continue;
+    if (commands.length < 3) continue;
     const content = `${categoryLabel(category)} workflow: ${commands.join(' && ')}`;
     await updateOrCreateProcedural(db, content, category);
   }
@@ -98,14 +166,27 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
     const emb = embeddings[i];
 
     if (emb) {
-      const similar = db.findSimilarMemory(emb, 0.10, record.type as MemoryType);
+      const similar = db.findSimilarMemory(emb, THRESHOLDS.EPISODIC_DEDUP, record.type as MemoryType);
       if (similar) continue;
     }
 
-    db.insertMemory(record);
+    const splitResult = splitByTopics(record.content);
+    if (splitResult.shouldSplit && splitResult.sections) {
+      await insertSplitSections(db, splitResult.sections, {
+        type: record.type as MemoryType,
+        context: record.context ?? undefined,
+        tags: safeParseTags(record.tags),
+      });
+    } else {
+      db.insertMemory(record);
+    }
   }
 
-  await detectAndCreatePatterns(db);
+  await detectAndStorePatterns(db);
+
+  const weight = computeSessionWeight(summary);
+  const currentWeight = parseFloat(db.getSessionMeta('consolidation_weight') ?? '0');
+  db.setSessionMeta('consolidation_weight', String(currentWeight + weight));
 
   return { ok: true };
 }
@@ -129,12 +210,22 @@ async function mergeOrCreateSemantic(
 ): Promise<void> {
   const existing = db.findMemoryByTag('semantic', matchTag);
   if (existing) {
-    const existingItems = parseListContent(existing.content);
-    const incomingItems = parseListContent(content);
-    const merged = [...new Set([...existingItems, ...incomingItems])].sort();
+    const existingItems = parseItemsWithCounts(existing.content);
+    const incomingNames = parseListContent(content);
+
+    if (incomingNames.every((name) => existingItems.some((e) => e.name === name))) return;
+
+    const merged = new Map<string, number>();
+    for (const item of existingItems) merged.set(item.name, item.count);
+    for (const name of incomingNames) merged.set(name, (merged.get(name) ?? 0) + 1);
+
+    const ranked = [...merged.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, SEMANTIC_SINGLETON_CAP)
+      .map(([name, count]) => ({ name, count }));
 
     const prefix = content.slice(0, content.indexOf(':') + 1);
-    const mergedContent = `${prefix} ${merged.join(', ')}`;
+    const mergedContent = `${prefix} ${formatItemsWithCounts(ranked)}`;
 
     db.updateMemory(existing.id, { content: mergedContent });
 
@@ -145,23 +236,29 @@ async function mergeOrCreateSemantic(
     return;
   }
 
-  const emb = await generateEmbedding(content);
-  const record = makeMemoryRecord('semantic', content, tags, { title, context: 'session-end auto-save' });
+  const incomingNames = parseListContent(content);
+  const initial = incomingNames.map((name) => ({ name, count: 1 }));
+  const prefix = content.slice(0, content.indexOf(':') + 1);
+  const initialContent = `${prefix} ${formatItemsWithCounts(initial)}`;
+
+  const emb = await generateEmbedding(initialContent);
+  const record = makeMemoryRecord('semantic', initialContent, tags, { title, context: 'session-end auto-save' });
   if (emb) {
     record.embedding = embeddingToBuffer(emb);
   }
   db.insertMemory(record);
 }
 
-async function updateOrCreateProcedural(
-  db: MemoryDatabase,
-  content: string,
-  category: BashCategory,
-): Promise<void> {
+async function updateOrCreateProcedural(db: MemoryDatabase, content: string, category: BashCategory): Promise<void> {
   const existing = db.findMemoryByTag('procedural', category);
   if (existing) {
-    db.updateMemory(existing.id, { content });
-    const newEmb = await generateEmbedding(content);
+    const existingCmds = parseWorkflowCommands(existing.content);
+    const incomingCmds = parseWorkflowCommands(content);
+    if (incomingCmds.every((cmd) => existingCmds.includes(cmd))) return;
+    const merged = [...new Set([...existingCmds, ...incomingCmds])];
+    const mergedContent = `${categoryLabel(category)} workflow: ${merged.join(' && ')}`;
+    db.updateMemory(existing.id, { content: mergedContent });
+    const newEmb = await generateEmbedding(mergedContent);
     if (newEmb) {
       db.updateMemoryEmbedding(existing.id, newEmb);
     }
@@ -185,6 +282,7 @@ function groupSuccessfulCommands(
   const grouped = new Map<BashCategory, string[]>();
   for (const cmd of commands) {
     if (!cmd.success || cmd.category === 'other' || cmd.category === 'git') continue;
+    if (isTrivialCommand(cmd.command)) continue;
     const list = grouped.get(cmd.category) ?? [];
     if (!list.includes(cmd.command)) {
       list.push(cmd.command);
@@ -224,126 +322,3 @@ function extractActiveModules(filesModified: string[]): string[] {
     .map(([dir]) => dir);
 }
 
-function extractTaskFromEpisodic(content: string): string {
-  const taskMatch = content.match(/\*\*Task:\*\*\s*(.+?)(?:\n|$)/);
-  return taskMatch ? taskMatch[1].trim() : content.slice(0, 100);
-}
-
-async function detectAndCreatePatterns(db: MemoryDatabase): Promise<void> {
-  const recentEpisodics = db.getRecentEpisodicWithEmbeddings(30, 50);
-
-  const clusterCandidates = recentEpisodics.filter((mem) => {
-    const tags = safeParseTags(mem.tags);
-    if (!tags.includes('session-end')) return false;
-    if (mem.content.includes('[Request interrupted')) return false;
-    return true;
-  });
-  if (clusterCandidates.length < 3) return;
-
-  const existingPatterns = db.getMemoriesByTypeWithEmbeddings('pattern', 20);
-
-  const clusters: number[][] = [];
-  const assigned = new Set<number>();
-
-  for (let i = 0; i < clusterCandidates.length; i++) {
-    if (assigned.has(i)) continue;
-    const cluster = [i];
-    assigned.add(i);
-
-    const embI = bufferToEmbedding(clusterCandidates[i].embedding);
-    for (let j = i + 1; j < clusterCandidates.length; j++) {
-      if (assigned.has(j)) continue;
-      const embJ = bufferToEmbedding(clusterCandidates[j].embedding);
-      const similarity = cosineSimilarity(embI, embJ);
-      if (similarity >= 0.4 && similarity <= 0.95) {
-        cluster.push(j);
-        assigned.add(j);
-      }
-    }
-
-    if (cluster.length >= 3) {
-      clusters.push(cluster);
-    }
-  }
-
-  if (clusters.length === 0) return;
-
-  const patternTexts: string[] = [];
-  const patternData: { memberIds: string[]; clusterIdx: number }[] = [];
-
-  for (let ci = 0; ci < clusters.length; ci++) {
-    const cluster = clusters[ci];
-
-    const dim = 384;
-    const centroid = new Float32Array(dim);
-    for (const idx of cluster) {
-      const emb = bufferToEmbedding(clusterCandidates[idx].embedding);
-      for (let d = 0; d < dim; d++) centroid[d] += emb[d];
-    }
-    for (let d = 0; d < dim; d++) centroid[d] /= cluster.length;
-    let norm = 0;
-    for (let d = 0; d < dim; d++) norm += centroid[d] * centroid[d];
-    norm = Math.sqrt(norm);
-    if (norm > 0) for (let d = 0; d < dim; d++) centroid[d] /= norm;
-
-    let covered = false;
-    for (const pat of existingPatterns) {
-      const patEmb = bufferToEmbedding(pat.embedding);
-      const sim = cosineSimilarity(centroid, patEmb);
-      if (sim > 0.5) {
-        covered = true;
-        break;
-      }
-    }
-    if (covered) continue;
-
-    const taskDescriptions = cluster
-      .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
-      .filter((t) => t.length > 0);
-    const title = derivePatternTitle(taskDescriptions);
-    const content = `Recurring theme across ${cluster.length} sessions: ${taskDescriptions.join(' | ')}`;
-
-    patternTexts.push(`${title}: ${content}`);
-    patternData.push({
-      memberIds: cluster.map((idx) => clusterCandidates[idx].id),
-      clusterIdx: ci,
-    });
-  }
-
-  if (patternTexts.length === 0) return;
-
-  const patternEmbeddings = await generateEmbeddings(patternTexts);
-
-  for (let i = 0; i < patternData.length; i++) {
-    const emb = patternEmbeddings[i];
-    if (!emb) continue;
-
-    const similar = db.findSimilarMemory(emb, 0.05);
-    if (similar) continue;
-
-    const taskDescriptions = patternData[i].memberIds
-      .map((id) => {
-        const mem = clusterCandidates.find((e) => e.id === id);
-        return mem ? extractTaskFromEpisodic(mem.content) : '';
-      })
-      .filter((t) => t.length > 0);
-    const title = derivePatternTitle(taskDescriptions);
-    const content = patternTexts[i].slice(patternTexts[i].indexOf(':') + 2);
-
-    const record = makeMemoryRecord('pattern', content, ['auto-pattern'], {
-      title,
-      importance: 0.8,
-      context: 'auto-consolidation',
-    });
-    record.embedding = embeddingToBuffer(emb);
-    db.insertMemory(record);
-
-    for (const memberId of patternData[i].memberIds) {
-      try {
-        db.addRelation(record.id, memberId, 'derived_from', 0.7);
-      } catch {
-        // Relation insert failed
-      }
-    }
-  }
-}

@@ -11,6 +11,7 @@ export interface BashCommand {
 export interface TranscriptSummary {
   taskSummary: string;
   toolsUsed: string[];
+  toolCallCount: number;
   filesModified: string[];
   filesRead: string[];
   errorCount: number;
@@ -21,6 +22,11 @@ export interface TranscriptSummary {
 }
 
 const READ_ONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch']);
+const NOISE_TOOL_PREFIXES = ['mcp__claude-memory__'];
+
+function isNoiseTool(name: string): boolean {
+  return READ_ONLY_TOOLS.has(name) || NOISE_TOOL_PREFIXES.some((p) => name.startsWith(p));
+}
 
 const CATEGORY_PATTERNS: [BashCategory, RegExp][] = [
   ['test', /\b(jest|vitest|mocha|pytest|cargo\s+test|go\s+test|npm\s+test|npx\s+test|node\s+--test)\b/],
@@ -84,6 +90,7 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
   const result: TranscriptSummary = {
     taskSummary: '',
     toolsUsed: [],
+    toolCallCount: 0,
     filesModified: [],
     filesRead: [],
     errorCount: 0,
@@ -142,8 +149,9 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
       }>) {
         if (block.type === 'tool_use') {
           const name = block.name;
-          if (name && !READ_ONLY_TOOLS.has(name)) {
+          if (name && !isNoiseTool(name)) {
             toolsUsed.add(name);
+            result.toolCallCount++;
           }
 
           if (name === 'memory_search' || name === 'mcp__claude-memory__memory_search') {
@@ -188,7 +196,8 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
       const content = typeof msg.content === 'string' ? msg.content : '';
 
       if (toolUseId && pendingBash.has(toolUseId)) {
-        const cmd = pendingBash.get(toolUseId)!;
+        const cmd = pendingBash.get(toolUseId);
+        if (!cmd) continue;
         pendingBash.delete(toolUseId);
         const isError = /\b(error|Error|ERROR|failed|FAILED|Traceback|ENOENT|exit code [1-9])\b/.test(content);
         result.bashCommands.push({

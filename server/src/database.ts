@@ -4,6 +4,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MemoryRow, Relation, MemoryType, RelationType } from './types.js';
 import { embeddingToBuffer, bufferToEmbedding } from './embeddings.js';
+import { THRESHOLDS } from './thresholds.js';
+import type { ScoringWeights } from './thresholds.js';
 
 const SCHEMA_VERSION = 1;
 
@@ -17,6 +19,25 @@ function sanitizeFtsQuery(query: string): string {
 // (negative IDF). An FTS match still indicates topic relevance, so we apply a floor
 // to distinguish "FTS matched with common terms" from "FTS didn't match at all".
 const FTS_MATCH_FLOOR = 0.05;
+
+/** Two-phase recency decay: steep 0–7 day drop, then gradual exponential plateau. */
+export function recencyScore(ageDays: number): number {
+  if (ageDays <= 0) return 1.0;
+  if (ageDays <= THRESHOLDS.RECENCY_SHORT_TERM_DAYS) {
+    return 1 - THRESHOLDS.RECENCY_SHORT_TERM_DROP * (ageDays / THRESHOLDS.RECENCY_SHORT_TERM_DAYS);
+  }
+  return (
+    (1 - THRESHOLDS.RECENCY_SHORT_TERM_DROP) *
+    Math.exp(-(ageDays - THRESHOLDS.RECENCY_SHORT_TERM_DAYS) / THRESHOLDS.RECENCY_LONG_TERM_TAU)
+  );
+}
+
+/** Penalty for overly long content that tends to match many queries generically. */
+export function contentLengthPenalty(contentLength: number): number {
+  if (contentLength <= THRESHOLDS.CONTENT_LENGTH_PENALTY_START) return 0;
+  const excess = contentLength - THRESHOLDS.CONTENT_LENGTH_PENALTY_START;
+  return THRESHOLDS.CONTENT_LENGTH_PENALTY_MAX * (1 - Math.exp(-excess / THRESHOLDS.CONTENT_LENGTH_PENALTY_SCALE));
+}
 
 export type RelevanceFilterOptions = {
   topicThreshold?: number;
@@ -56,6 +77,15 @@ export class MemoryDatabase {
       // No migration — fresh start at v1
       this.db.prepare('UPDATE schema_version SET version = ?').run(SCHEMA_VERSION);
     }
+
+    this.addColumnIfMissing('memories', 'injection_count', 'INTEGER NOT NULL DEFAULT 0');
+  }
+
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const columns = this.db.pragma(`table_info(${table})`) as { name: string }[];
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   private createSchema(): void {
@@ -73,6 +103,7 @@ export class MemoryDatabase {
         updated_at TEXT NOT NULL,
         access_count INTEGER NOT NULL DEFAULT 0,
         last_accessed TEXT,
+        injection_count INTEGER NOT NULL DEFAULT 0,
         embedding BLOB
       );
 
@@ -183,7 +214,8 @@ export class MemoryDatabase {
       this.db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = @id`).run(params);
 
       this.db.prepare('DELETE FROM memories_fts WHERE rowid = (SELECT rowid FROM memories WHERE id = ?)').run(id);
-      const updated = this.getMemoryByIdRaw(id)!;
+      const updated = this.getMemoryByIdRaw(id);
+      if (!updated) throw new Error(`Memory ${id} not found after update`);
       this.db
         .prepare(
           `INSERT INTO memories_fts (rowid, title, content, tags)
@@ -207,12 +239,17 @@ export class MemoryDatabase {
     const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as MemoryRow | undefined;
     if (!row) return null;
     this.db
-      .prepare(
-        `UPDATE memories SET access_count = access_count + 1, last_accessed = ?,
-         importance = MIN(0.95, importance + 0.01) WHERE id = ?`,
-      )
+      .prepare(`UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?`)
       .run(new Date().toISOString(), id);
     return row;
+  }
+
+  incrementInjectionCount(ids: string[]): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(',');
+    this.db
+      .prepare(`UPDATE memories SET injection_count = injection_count + 1 WHERE id IN (${placeholders})`)
+      .run(...ids);
   }
 
   deleteMemory(id: string): boolean {
@@ -249,6 +286,7 @@ export class MemoryDatabase {
     queryEmbedding: Float32Array | null,
     limit = 20,
     filter?: RelevanceFilterOptions,
+    weights?: ScoringWeights,
   ): ScoredMemoryRow[] {
     const ftsResults = new Map<string, { row: MemoryRow; ftsScore: number }>();
     const safeQuery = sanitizeFtsQuery(query);
@@ -302,6 +340,7 @@ export class MemoryDatabase {
     const now = Date.now();
     const topicThreshold = filter?.topicThreshold ?? 0.05;
     const relevanceThreshold = filter?.relevanceThreshold ?? 0;
+    const w = weights ?? THRESHOLDS.SCORING_WEIGHTS;
 
     for (const id of allIds) {
       const fts = ftsResults.get(id);
@@ -328,11 +367,19 @@ export class MemoryDatabase {
 
       const ageMs = now - new Date(row.created_at).getTime();
       const ageDays = ageMs / (1000 * 60 * 60 * 24);
-      const recencyBoost = Math.exp(-ageDays / 90);
+      const recencyBoost = recencyScore(ageDays);
       const accessBoost = Math.min(1, Math.log2(row.access_count + 1) / 5);
       const importanceWeight = row.importance;
+      const lengthPenalty = contentLengthPenalty(row.content.length);
 
-      const finalScore = textScore * 0.5 + importanceWeight * 0.2 + recencyBoost * 0.2 + accessBoost * 0.1;
+      const finalScore = Math.max(
+        0,
+        textScore * w.textScore +
+          importanceWeight * w.importance +
+          recencyBoost * w.recency +
+          accessBoost * w.access -
+          lengthPenalty,
+      );
 
       if (relevanceThreshold > 0 && finalScore < relevanceThreshold) continue;
 
@@ -341,13 +388,6 @@ export class MemoryDatabase {
 
     scored.sort((a, b) => b.score - a.score);
     const results = scored.slice(0, limit);
-
-    // Auto-boost: nudge importance for top search hits
-    for (const row of results) {
-      if (row.importance < 0.95) {
-        this.db.prepare('UPDATE memories SET importance = MIN(1.0, importance + 0.02) WHERE id = ?').run(row.id);
-      }
-    }
 
     return results;
   }
@@ -419,7 +459,9 @@ export class MemoryDatabase {
     const queue: { nodeId: string; currentDepth: number }[] = [{ nodeId: id, currentDepth: 0 }];
 
     while (queue.length > 0) {
-      const { nodeId, currentDepth } = queue.shift()!;
+      const entry = queue.shift();
+      if (!entry) break;
+      const { nodeId, currentDepth } = entry;
       if (visited.has(nodeId) || currentDepth > depth || visited.size >= maxNodes) continue;
       visited.add(nodeId);
 
@@ -503,7 +545,7 @@ export class MemoryDatabase {
     return tx();
   }
 
-  cleanupOldEpisodicMemories(maxAgeDays = 90): number {
+  cleanupOldEpisodicMemories(maxAgeDays = 60): number {
     const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
     const tx = this.db.transaction(() => {
       const targets = this.db
@@ -511,8 +553,8 @@ export class MemoryDatabase {
           `SELECT rowid, id FROM memories
            WHERE type = 'episodic'
              AND created_at < ?
-             AND importance < 0.7
-             AND access_count < 3`,
+             AND importance < 0.4
+             AND access_count < 1`,
         )
         .all(cutoff) as { rowid: number; id: string }[];
 
@@ -532,11 +574,11 @@ export class MemoryDatabase {
     return tx();
   }
 
-  decayImportance(daysThreshold: number, decayAmount: number): number {
+  decayImportance(daysThreshold: number, decayRate: number): number {
     const cutoff = new Date(Date.now() - daysThreshold * 24 * 60 * 60 * 1000).toISOString();
     const stmtFull = this.db.prepare(
       `UPDATE memories
-       SET importance = MAX(0.1, importance - ?)
+       SET importance = MAX(0.1, importance * (1 - ?))
        WHERE (last_accessed IS NULL OR last_accessed < ?)
          AND importance > 0.1
          AND type NOT IN ('working')
@@ -544,7 +586,7 @@ export class MemoryDatabase {
     );
     const stmtHalf = this.db.prepare(
       `UPDATE memories
-       SET importance = MAX(0.1, importance - ?)
+       SET importance = MAX(0.1, importance * (1 - ?))
        WHERE (last_accessed IS NULL OR last_accessed < ?)
          AND importance > 0.1
          AND type NOT IN ('working')
@@ -552,15 +594,15 @@ export class MemoryDatabase {
     );
     const stmtQuarter = this.db.prepare(
       `UPDATE memories
-       SET importance = MAX(0.1, importance - ?)
+       SET importance = MAX(0.1, importance * (1 - ?))
        WHERE (last_accessed IS NULL OR last_accessed < ?)
          AND importance > 0.1
          AND type NOT IN ('working')
          AND access_count > 10`,
     );
-    const r1 = stmtFull.run(decayAmount, cutoff);
-    const r2 = stmtHalf.run(decayAmount * 0.5, cutoff);
-    const r3 = stmtQuarter.run(decayAmount * 0.25, cutoff);
+    const r1 = stmtFull.run(decayRate, cutoff);
+    const r2 = stmtHalf.run(decayRate * 0.5, cutoff);
+    const r3 = stmtQuarter.run(decayRate * 0.25, cutoff);
     return r1.changes + r2.changes + r3.changes;
   }
 
@@ -580,14 +622,14 @@ export class MemoryDatabase {
       .all(embedding, limit + 5) as { id: string; distance: number; vec_rowid: number }[];
 
     return rows
-      .filter((r) => r.distance >= 0.05 && r.distance < 0.35)
+      .filter((r) => r.distance >= THRESHOLDS.EXACT_DUPLICATE && r.distance < THRESHOLDS.RELATED_UPPER)
       .slice(0, limit)
       .map(({ id, distance }) => ({ id, distance }));
   }
 
   findSimilarMemory(
     embedding: Float32Array,
-    threshold = 0.05,
+    threshold: number = THRESHOLDS.EXACT_DUPLICATE,
     type?: MemoryType,
   ): { id: string; distance: number } | null {
     const sql = type
@@ -611,9 +653,11 @@ export class MemoryDatabase {
          ) v
          JOIN memories m ON m.rowid = v.vec_rowid`;
 
-    const rows = (
-      type ? this.db.prepare(sql).all(embedding, type) : this.db.prepare(sql).all(embedding)
-    ) as { id: string; distance: number; vec_rowid: number }[];
+    const rows = (type ? this.db.prepare(sql).all(embedding, type) : this.db.prepare(sql).all(embedding)) as {
+      id: string;
+      distance: number;
+      vec_rowid: number;
+    }[];
 
     if (rows.length > 0 && rows[0].distance < threshold) {
       return { id: rows[0].id, distance: rows[0].distance };
@@ -788,6 +832,17 @@ export class MemoryDatabase {
     ageDistribution: { last24h: number; last7d: number; last30d: number; older: number };
     sessionCount: number;
     lastConsolidation: number;
+    qualityMetrics: {
+      accessedRatio: number;
+      avgImportance: number;
+      importanceDistribution: { low: number; medium: number; high: number };
+      injectionStats: {
+        totalInjections: number;
+        neverInjected: number;
+        avgInjectionCount: number;
+        topInjected: number;
+      };
+    };
   } {
     const total = this.countMemories();
 
@@ -837,6 +892,45 @@ export class MemoryDatabase {
     const sessionCount = parseInt(this.getSessionMeta('session_count') ?? '0', 10);
     const lastConsolidation = parseInt(this.getSessionMeta('last_consolidation') ?? '0', 10);
 
+    // Quality metrics
+    const accessedCount = (
+      this.db.prepare('SELECT COUNT(*) as count FROM memories WHERE access_count > 0').get() as { count: number }
+    ).count;
+    const accessedRatio = total > 0 ? accessedCount / total : 0;
+
+    const avgImportance = (
+      this.db.prepare('SELECT COALESCE(AVG(importance), 0) as avg FROM memories').get() as { avg: number }
+    ).avg;
+
+    const importanceDist = this.db
+      .prepare(
+        `SELECT
+          SUM(CASE WHEN importance < 0.3 THEN 1 ELSE 0 END) as low,
+          SUM(CASE WHEN importance >= 0.3 AND importance < 0.7 THEN 1 ELSE 0 END) as medium,
+          SUM(CASE WHEN importance >= 0.7 THEN 1 ELSE 0 END) as high
+        FROM memories`,
+      )
+      .get() as { low: number; medium: number; high: number };
+
+    const injectionAgg = this.db
+      .prepare(
+        `SELECT
+          COALESCE(SUM(injection_count), 0) as totalInjections,
+          COALESCE(AVG(injection_count), 0) as avgInjectionCount,
+          COALESCE(MAX(injection_count), 0) as topInjected
+        FROM memories`,
+      )
+      .get() as { totalInjections: number; avgInjectionCount: number; topInjected: number };
+
+    const neverInjected = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) as count FROM memories
+           WHERE injection_count = 0 AND created_at < ? AND type != 'working'`,
+        )
+        .get(d7d) as { count: number }
+    ).count;
+
     return {
       total,
       byType,
@@ -846,6 +940,17 @@ export class MemoryDatabase {
       ageDistribution: { last24h, last7d, last30d, older },
       sessionCount,
       lastConsolidation,
+      qualityMetrics: {
+        accessedRatio,
+        avgImportance,
+        importanceDistribution: importanceDist,
+        injectionStats: {
+          totalInjections: injectionAgg.totalInjections,
+          neverInjected,
+          avgInjectionCount: injectionAgg.avgInjectionCount,
+          topInjected: injectionAgg.topInjected,
+        },
+      },
     };
   }
 
@@ -904,7 +1009,7 @@ export class MemoryDatabase {
 
       for (const n of neighbors) {
         if (n.id === row.id) continue;
-        if (n.distance >= 0.05 && n.distance < 0.1) {
+        if (n.distance >= THRESHOLDS.EXACT_DUPLICATE && n.distance < THRESHOLDS.NEAR_DUPLICATE) {
           const pairKey = [row.id, n.id].sort().join(':');
           if (!seenPairs.has(pairKey)) {
             seenPairs.add(pairKey);

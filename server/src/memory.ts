@@ -6,7 +6,8 @@ import { generateEmbedding, generateEmbeddings, cosineSimilarity, isEmbeddingsAv
 import { rerankResults, overfetchLimit, isRerankerAvailable } from './reranker.js';
 import { rowToMemory, type Memory, type MemoryType, type RelationType } from './types.js';
 import { splitByTopics, insertSplitSections } from './topic-splitter.js';
-import { normalizeTags, safeParseTags, buildMergeUpdates } from './merge-utils.js';
+import { normalizeTags, buildMergeUpdates } from './merge-utils.js';
+import { THRESHOLDS } from './thresholds.js';
 
 export { buildMergeUpdates, normalizeTags, safeParseTags, type MergeInput } from './merge-utils.js';
 
@@ -231,7 +232,7 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
   }
 
   if (embedding) {
-    const similar = db.findSimilarMemory(embedding, 0.05, memType as MemoryType);
+    const similar = db.findSimilarMemory(embedding, THRESHOLDS.EXACT_DUPLICATE, memType as MemoryType);
     if (similar) {
       const existing = db.getMemoryByIdRaw(similar.id);
       if (existing) {
@@ -271,6 +272,7 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
     updated_at: now,
     access_count: 0,
     last_accessed: null,
+    injection_count: 0,
   });
 
   let embeddingStatus = 'none';
@@ -319,8 +321,8 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
 
 const STRICTNESS_MAP: Record<string, RelevanceFilterOptions> = {
   low: { topicThreshold: 0.02, relevanceThreshold: 0 },
-  normal: { topicThreshold: 0.05, relevanceThreshold: 0.10 },
-  high: { topicThreshold: 0.15, relevanceThreshold: 0.20 },
+  normal: { topicThreshold: 0.05, relevanceThreshold: 0.1 },
+  high: { topicThreshold: 0.15, relevanceThreshold: 0.2 },
 };
 
 async function memorySearch(db: MemoryDatabase, args: Record<string, unknown>): Promise<ToolResult> {
@@ -349,10 +351,14 @@ async function memorySearch(db: MemoryDatabase, args: Record<string, unknown>): 
   // Rerank with cross-encoder, then slice to final limit
   const { results, reranked } = await rerankResults(query, scored, limit);
 
-  const formatted = results.map((row) => formatScoredMemory(rowToMemory(row), row.score, row.textScore)).join('\n---\n');
+  const formatted = results
+    .map((row) => formatScoredMemory(rowToMemory(row), row.score, row.textScore))
+    .join('\n---\n');
 
   const searchMode = queryEmbedding
-    ? reranked ? 'hybrid (text + semantic + reranked)' : 'hybrid (text + semantic)'
+    ? reranked
+      ? 'hybrid (text + semantic + reranked)'
+      : 'hybrid (text + semantic)'
     : 'text-only';
   return text(
     `Found ${results.length} memor${results.length === 1 ? 'y' : 'ies'} matching "${query}" [${searchMode}]:\n\n${formatted}`,
@@ -500,7 +506,9 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
 
     // Dedup pass 1: within-batch
     if (emb) {
-      const withinBatchDup = acceptedEmbeddings.find((a) => 1 - cosineSimilarity(a.embedding, emb) < 0.05);
+      const withinBatchDup = acceptedEmbeddings.find(
+        (a) => 1 - cosineSimilarity(a.embedding, emb) < THRESHOLDS.EXACT_DUPLICATE,
+      );
       if (withinBatchDup) {
         const existing = db.getMemoryByIdRaw(withinBatchDup.id);
         if (existing) {
@@ -524,7 +532,7 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
         continue;
       }
 
-      const dbDup = db.findSimilarMemory(emb, 0.05, item.type as MemoryType);
+      const dbDup = db.findSimilarMemory(emb, THRESHOLDS.EXACT_DUPLICATE, item.type as MemoryType);
       if (dbDup) {
         const existing = db.getMemoryByIdRaw(dbDup.id);
         if (existing) {
@@ -564,6 +572,7 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
       updated_at: now,
       access_count: 0,
       last_accessed: null,
+      injection_count: 0,
     });
 
     if (emb) {
@@ -711,7 +720,14 @@ ${typeLines}
 ## Session Info
 - **Session count:** ${stats.sessionCount}
 - **Last consolidation:** session #${stats.lastConsolidation}
-- **Sessions since consolidation:** ${stats.sessionCount - stats.lastConsolidation}`;
+- **Sessions since consolidation:** ${stats.sessionCount - stats.lastConsolidation}
+
+## Quality Metrics
+- **Accessed ratio:** ${stats.total > 0 ? (stats.qualityMetrics.accessedRatio * 100).toFixed(1) : '0'}% (${Math.round(stats.qualityMetrics.accessedRatio * stats.total)}/${stats.total})
+- **Avg importance:** ${stats.qualityMetrics.avgImportance.toFixed(2)}
+- **Importance distribution:** low(<0.3): ${stats.qualityMetrics.importanceDistribution.low ?? 0} | mid: ${stats.qualityMetrics.importanceDistribution.medium ?? 0} | high(>=0.7): ${stats.qualityMetrics.importanceDistribution.high ?? 0}
+- **Injections:** ${stats.qualityMetrics.injectionStats.totalInjections} total, avg ${stats.qualityMetrics.injectionStats.avgInjectionCount.toFixed(1)}/memory, max ${stats.qualityMetrics.injectionStats.topInjected}
+- **Never injected (>7d):** ${stats.qualityMetrics.injectionStats.neverInjected} memories`;
 
   return text(report);
 }
@@ -720,7 +736,7 @@ function formatMemory(m: Memory): string {
   const titleLine = m.title ? ` — ${m.title}` : '';
   const sourceLine = m.source ? ` | **Source:** ${m.source}` : '';
   return `**[${m.type}]** ${m.id}${titleLine}
-**Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Created:** ${m.created_at.slice(0, 10)}
+**Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Injected:** ${m.injection_count}x | **Created:** ${m.created_at.slice(0, 10)}
 **Tags:** ${m.tags.length > 0 ? m.tags.join(', ') : '(none)'}${sourceLine}
 ${m.context ? `**Context:** ${m.context}\n` : ''}
 ${m.content}`;
@@ -729,9 +745,12 @@ ${m.content}`;
 function formatScoredMemory(m: Memory, score: number, textScore?: number): string {
   const titleLine = m.title ? ` — ${m.title}` : '';
   const sourceLine = m.source ? ` | **Source:** ${m.source}` : '';
-  const scoreInfo = textScore !== undefined ? `score: ${score.toFixed(3)} (text: ${textScore.toFixed(3)})` : `score: ${score.toFixed(3)}`;
+  const scoreInfo =
+    textScore !== undefined
+      ? `score: ${score.toFixed(3)} (text: ${textScore.toFixed(3)})`
+      : `score: ${score.toFixed(3)}`;
   return `**[${m.type}]** ${m.id}${titleLine} — ${scoreInfo}
-**Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Created:** ${m.created_at.slice(0, 10)}
+**Importance:** ${m.importance} | **Accessed:** ${m.access_count}x | **Injected:** ${m.injection_count}x | **Created:** ${m.created_at.slice(0, 10)}
 **Tags:** ${m.tags.length > 0 ? m.tags.join(', ') : '(none)'}${sourceLine}
 ${m.context ? `**Context:** ${m.context}\n` : ''}
 ${m.content}`;

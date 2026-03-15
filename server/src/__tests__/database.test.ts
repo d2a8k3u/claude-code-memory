@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { MemoryDatabase } from '../database.js';
+import { MemoryDatabase, recencyScore, contentLengthPenalty } from '../database.js';
+import { THRESHOLDS } from '../thresholds.js';
 import { rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeTempDb, makeEmbedding, cleanup, makeMemoryRow } from './helpers.js';
@@ -205,6 +206,34 @@ describe('MemoryDatabase - access tracking', () => {
   it('returns null for nonexistent memory', () => {
     const { db, dir } = makeTempDb();
     assert.equal(db.getMemoryById('nonexistent'), null);
+    cleanup(db, dir);
+  });
+});
+
+describe('MemoryDatabase - injection tracking', () => {
+  it('increments injection_count for specified IDs', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'first' }));
+    db.insertMemory(makeMemoryRow({ id: 'mem2', content: 'second' }));
+    db.insertMemory(makeMemoryRow({ id: 'mem3', content: 'third' }));
+
+    db.incrementInjectionCount(['mem1', 'mem2']);
+    db.incrementInjectionCount(['mem1']);
+
+    const m1 = db.getMemoryByIdRaw('mem1');
+    const m2 = db.getMemoryByIdRaw('mem2');
+    const m3 = db.getMemoryByIdRaw('mem3');
+    assert.ok(m1 && m2 && m3);
+    assert.equal(m1.injection_count, 2);
+    assert.equal(m2.injection_count, 1);
+    assert.equal(m3.injection_count, 0);
+
+    cleanup(db, dir);
+  });
+
+  it('handles empty ID array gracefully', () => {
+    const { db, dir } = makeTempDb();
+    db.incrementInjectionCount([]);
     cleanup(db, dir);
   });
 });
@@ -632,7 +661,7 @@ describe('MemoryDatabase - hybrid search scoring', () => {
     cleanup(db, dir);
   });
 
-  it('auto-boosts importance for top search hits', () => {
+  it('does not auto-boost importance for search hits', () => {
     const { db, dir } = makeTempDb();
     db.insertMemory(
       makeMemoryRow({
@@ -644,11 +673,10 @@ describe('MemoryDatabase - hybrid search scoring', () => {
 
     db.hybridSearchMemories('specific keyword', null, 10);
 
-    // Re-read without triggering access (use listMemories)
     const rows = db.listMemories(undefined, 20, 0);
     const m1 = rows.find((r) => r.id === 'm1');
     assert.ok(m1);
-    assert.ok(m1.importance > 0.5);
+    assert.equal(m1.importance, 0.5);
     cleanup(db, dir);
   });
 });
@@ -772,7 +800,7 @@ describe('MemoryDatabase - relevance filtering', () => {
     cleanup(db, dir);
   });
 
-  it('auto-boost is not applied to filtered-out results', () => {
+  it('search does not modify importance of any results', () => {
     const { db, dir } = makeTempDb();
 
     db.insertMemory(
@@ -782,15 +810,13 @@ describe('MemoryDatabase - relevance filtering', () => {
         importance: 0.5,
       }),
     );
-    // Give noise a very different embedding from the query
     db.updateMemoryEmbedding('noise', makeEmbedding(999));
 
-    // Search with a different embedding — vec similarity will be low, FTS won't match
     db.hybridSearchMemories('machine learning', makeEmbedding(1), 10, { topicThreshold: 0.05 });
 
     const row = db.getMemoryByIdRaw('noise');
     assert.ok(row);
-    assert.equal(row.importance, 0.5, 'Importance should not change for filtered-out results');
+    assert.equal(row.importance, 0.5, 'Importance should not change after search');
     cleanup(db, dir);
   });
 
@@ -884,6 +910,195 @@ describe('MemoryDatabase - relevance filtering', () => {
       assert.ok(r.textScore >= 0.05, `textScore ${r.textScore} should meet topic threshold`);
       assert.ok(r.score >= 0.25, `score ${r.score} should meet relevance threshold`);
     }
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// D3: Two-phase recency scoring
+// ==========================================================
+describe('recencyScore', () => {
+  it('returns 1.0 for brand-new memories', () => {
+    assert.strictEqual(recencyScore(0), 1.0);
+  });
+
+  it('returns expected value at the short-term boundary', () => {
+    const expected = 1 - THRESHOLDS.RECENCY_SHORT_TERM_DROP;
+    assert.ok(Math.abs(recencyScore(THRESHOLDS.RECENCY_SHORT_TERM_DAYS) - expected) < 0.001);
+  });
+
+  it('is continuous at the boundary', () => {
+    const justBefore = recencyScore(6.99);
+    const justAfter = recencyScore(7.01);
+    assert.ok(Math.abs(justBefore - justAfter) < 0.01, `Discontinuity: ${justBefore} vs ${justAfter}`);
+  });
+
+  it('day-old scores meaningfully higher than week-old', () => {
+    const day1 = recencyScore(1);
+    const day7 = recencyScore(7);
+    assert.ok(day1 - day7 > 0.2, `Gap too small: ${day1} vs ${day7}`);
+  });
+
+  it('week-old scores higher than month-old', () => {
+    assert.ok(recencyScore(7) > recencyScore(30));
+  });
+
+  it('year-old score approaches zero', () => {
+    assert.ok(recencyScore(365) < 0.1);
+  });
+});
+
+// ==========================================================
+// D2: Content-length penalty
+// ==========================================================
+describe('contentLengthPenalty', () => {
+  it('returns 0 for short content', () => {
+    assert.strictEqual(contentLengthPenalty(200), 0);
+    assert.strictEqual(contentLengthPenalty(500), 0);
+  });
+
+  it('increases for longer content', () => {
+    assert.ok(contentLengthPenalty(1500) > contentLengthPenalty(800));
+    assert.ok(contentLengthPenalty(3000) > contentLengthPenalty(1500));
+  });
+
+  it('asymptotically approaches CONTENT_LENGTH_PENALTY_MAX', () => {
+    const huge = contentLengthPenalty(100000);
+    assert.ok(Math.abs(huge - 0.15) < 0.005, `Expected ~0.15, got ${huge}`);
+  });
+
+  it('short memory is not penalized in search', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'short', content: 'database query optimization patterns' }));
+    const results = db.hybridSearchMemories('database query', null, 10);
+    assert.strictEqual(results.length, 1);
+    // Score should not be affected by penalty (content < 500 chars)
+    assert.ok(results[0].score > 0);
+    cleanup(db, dir);
+  });
+
+  it('short memory ranks above equivalent long memory', () => {
+    const { db, dir } = makeTempDb();
+    const longContent = 'database query optimization ' + 'extra filler content '.repeat(200);
+    db.insertMemory(makeMemoryRow({ id: 'short-m', content: 'database query optimization patterns', importance: 0.5 }));
+    db.insertMemory(makeMemoryRow({ id: 'long-m', content: longContent, importance: 0.5 }));
+
+    const results = db.hybridSearchMemories('database query', null, 10, { topicThreshold: 0 });
+    const ids = results.map((r) => r.id);
+    assert.ok(ids.indexOf('short-m') < ids.indexOf('long-m'), 'Short memory should rank above long memory');
+    cleanup(db, dir);
+  });
+});
+
+// ==========================================================
+// D1: Configurable scoring weights
+// ==========================================================
+describe('MemoryDatabase - configurable scoring weights', () => {
+  it('default weights produce same results as omitting weights', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'm1', content: 'machine learning algorithms' }));
+    db.insertMemory(makeMemoryRow({ id: 'm2', content: 'database optimization techniques' }));
+
+    const withoutWeights = db.hybridSearchMemories('machine learning', null, 10);
+    const withDefaults = db.hybridSearchMemories('machine learning', null, 10, undefined, THRESHOLDS.SCORING_WEIGHTS);
+
+    assert.deepStrictEqual(
+      withoutWeights.map((r) => r.id),
+      withDefaults.map((r) => r.id),
+    );
+    for (let i = 0; i < withoutWeights.length; i++) {
+      assert.ok(Math.abs(withoutWeights[i].score - withDefaults[i].score) < 0.001, `Score mismatch at index ${i}`);
+    }
+    cleanup(db, dir);
+  });
+
+  it('recency-heavy weights favor recent memories', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(makeMemoryRow({ id: 'recent-low', content: 'machine learning basics', importance: 0.2 }));
+    db.insertMemory(
+      makeMemoryRow({
+        id: 'old-high',
+        content: 'machine learning advanced',
+        importance: 0.9,
+        created_at: oldDate,
+        updated_at: oldDate,
+      }),
+    );
+
+    const recencyHeavy = db.hybridSearchMemories(
+      'machine learning',
+      null,
+      10,
+      { topicThreshold: 0 },
+      {
+        textScore: 0.3,
+        importance: 0.05,
+        recency: 0.6,
+        access: 0.05,
+      },
+    );
+    const ids = recencyHeavy.map((r) => r.id);
+    assert.strictEqual(ids[0], 'recent-low', 'Recent memory should rank first with recency-heavy weights');
+    cleanup(db, dir);
+  });
+
+  it('zero weight eliminates component influence', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'm1', content: 'unique searchable term alpha', importance: 0.1 }));
+    db.insertMemory(makeMemoryRow({ id: 'm2', content: 'unique searchable term beta', importance: 0.9 }));
+
+    // With text-only weights, importance shouldn't matter
+    const textOnly = db.hybridSearchMemories(
+      'unique searchable term',
+      null,
+      10,
+      { topicThreshold: 0 },
+      {
+        textScore: 1.0,
+        importance: 0,
+        recency: 0,
+        access: 0,
+      },
+    );
+    // Both should have the same score (identical textScore, zero everything else)
+    assert.ok(textOnly.length >= 2);
+    assert.ok(
+      Math.abs(textOnly[0].score - textOnly[1].score) < 0.05,
+      'Scores should be nearly equal when only textScore matters',
+    );
+    cleanup(db, dir);
+  });
+
+  it('filter thresholds work independently of custom weights', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'm1', content: 'specific database keyword', importance: 0.5 }));
+
+    // Without relevanceThreshold, low weights still produce results
+    const unfiltered = db.hybridSearchMemories(
+      'specific database keyword',
+      null,
+      10,
+      { topicThreshold: 0 },
+      {
+        textScore: 0.1,
+        importance: 0.1,
+        recency: 0.1,
+        access: 0.1,
+      },
+    );
+    assert.ok(unfiltered.length > 0, 'Should find results without relevanceThreshold');
+
+    // With relevanceThreshold 0.5, low weights produce scores below threshold → filtered out
+    const filtered = db.hybridSearchMemories(
+      'specific database keyword',
+      null,
+      10,
+      { topicThreshold: 0, relevanceThreshold: 0.5 },
+      { textScore: 0.1, importance: 0.1, recency: 0.1, access: 0.1 },
+    );
+    assert.strictEqual(filtered.length, 0, 'Low weights + high relevanceThreshold should filter everything');
     cleanup(db, dir);
   });
 });
@@ -991,7 +1206,7 @@ describe('MemoryDatabase - episodic cleanup', () => {
       }),
     );
 
-    const cleaned = db.cleanupOldEpisodicMemories(90);
+    const cleaned = db.cleanupOldEpisodicMemories(60);
     assert.equal(cleaned, 1);
     assert.equal(db.getMemoryById('old-low'), null);
     assert.ok(db.getMemoryById('old-important'));
@@ -1011,7 +1226,7 @@ describe('MemoryDatabase - episodic cleanup', () => {
       }),
     );
 
-    const cleaned = db.cleanupOldEpisodicMemories(90);
+    const cleaned = db.cleanupOldEpisodicMemories(60);
     assert.equal(cleaned, 0);
     cleanup(db, dir);
   });
@@ -1235,32 +1450,23 @@ describe('MemoryDatabase - getMemoryByIdRaw', () => {
 // ==========================================================
 // Dynamic importance boost on access
 // ==========================================================
-describe('MemoryDatabase - dynamic importance boost', () => {
-  it('adds +0.01 importance on getMemoryById', () => {
+describe('MemoryDatabase - access does not modify importance', () => {
+  it('getMemoryById does not boost importance', () => {
     const { db, dir } = makeTempDb();
     db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.5 }));
 
     db.getMemoryById('mem1');
-    const row = db.getMemoryByIdRaw('mem1');
-    assert.ok(row);
-    assert.ok(Math.abs(row.importance - 0.51) < 0.001, `Expected ~0.51 but got ${row.importance}`);
-
-    cleanup(db, dir);
-  });
-
-  it('caps importance at 0.95', () => {
-    const { db, dir } = makeTempDb();
-    db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.95 }));
-
     db.getMemoryById('mem1');
+    db.getMemoryById('mem1');
+
     const row = db.getMemoryByIdRaw('mem1');
     assert.ok(row);
-    assert.ok(row.importance <= 0.95, `Expected <= 0.95 but got ${row.importance}`);
+    assert.equal(row.importance, 0.5);
 
     cleanup(db, dir);
   });
 
-  it('is not applied by getMemoryByIdRaw', () => {
+  it('getMemoryByIdRaw does not modify importance', () => {
     const { db, dir } = makeTempDb();
     db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test', importance: 0.5 }));
 
@@ -1295,10 +1501,10 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    db.decayImportance(30, 0.10);
+    db.decayImportance(30, 0.1);
     const row = db.getMemoryByIdRaw('low-access');
     assert.ok(row);
-    assert.ok(Math.abs(row.importance - 0.6) < 0.001, `Expected ~0.6 but got ${row.importance}`);
+    assert.ok(Math.abs(row.importance - 0.63) < 0.001, `Expected ~0.63 but got ${row.importance}`);
 
     cleanup(db, dir);
   });
@@ -1318,10 +1524,10 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    db.decayImportance(30, 0.10);
+    db.decayImportance(30, 0.1);
     const row = db.getMemoryByIdRaw('mid-access');
     assert.ok(row);
-    assert.ok(Math.abs(row.importance - 0.65) < 0.001, `Expected ~0.65 but got ${row.importance}`);
+    assert.ok(Math.abs(row.importance - 0.665) < 0.001, `Expected ~0.665 but got ${row.importance}`);
 
     cleanup(db, dir);
   });
@@ -1341,10 +1547,10 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    db.decayImportance(30, 0.10);
+    db.decayImportance(30, 0.1);
     const row = db.getMemoryByIdRaw('high-access');
     assert.ok(row);
-    assert.ok(Math.abs(row.importance - 0.675) < 0.001, `Expected ~0.675 but got ${row.importance}`);
+    assert.ok(Math.abs(row.importance - 0.6825) < 0.001, `Expected ~0.6825 but got ${row.importance}`);
 
     cleanup(db, dir);
   });
@@ -1364,7 +1570,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    db.decayImportance(30, 0.10);
+    db.decayImportance(30, 0.1);
     const row = db.getMemoryByIdRaw('near-floor');
     assert.ok(row);
     assert.ok(row.importance >= 0.1);
@@ -1388,7 +1594,7 @@ describe('MemoryDatabase - velocity-aware decay', () => {
       }),
     );
 
-    const decayed = db.decayImportance(30, 0.10);
+    const decayed = db.decayImportance(30, 0.1);
     assert.equal(decayed, 0);
 
     cleanup(db, dir);
@@ -1526,6 +1732,31 @@ describe('MemoryDatabase - getHealthStats', () => {
 
     const stats = db.getHealthStats();
     assert.equal(stats.staleCount, 1);
+
+    cleanup(db, dir);
+  });
+
+  it('reports quality metrics including injection stats', () => {
+    const { db, dir } = makeTempDb();
+    const oldDate = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+
+    db.insertMemory(makeMemoryRow({ id: 'm1', content: 'a', importance: 0.2, created_at: oldDate, updated_at: oldDate }));
+    db.insertMemory(makeMemoryRow({ id: 'm2', content: 'b', importance: 0.5 }));
+    db.insertMemory(makeMemoryRow({ id: 'm3', content: 'c', importance: 0.9 }));
+
+    db.incrementInjectionCount(['m1', 'm2']);
+    db.incrementInjectionCount(['m1']);
+    db.getMemoryById('m2'); // increment access_count
+
+    const stats = db.getHealthStats();
+    assert.equal(stats.qualityMetrics.injectionStats.totalInjections, 3);
+    assert.equal(stats.qualityMetrics.injectionStats.topInjected, 2);
+    assert.ok(stats.qualityMetrics.accessedRatio > 0);
+    assert.ok(stats.qualityMetrics.avgImportance > 0);
+    assert.ok(stats.qualityMetrics.importanceDistribution.low >= 1);
+    assert.ok(stats.qualityMetrics.importanceDistribution.high >= 1);
+    // m1 is old but WAS injected; m2/m3 are recent (<7d). So neverInjected = 0
+    assert.equal(stats.qualityMetrics.injectionStats.neverInjected, 0);
 
     cleanup(db, dir);
   });

@@ -31,10 +31,10 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
 
   it('returns valid output with no memories and no git signals', async () => {
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    assert.ok(result.hookSpecificOutput);
-    assert.equal(result.hookSpecificOutput!.hookEventName, 'SessionStart');
-    assert.ok(result.hookSpecificOutput!.additionalContext.includes('# Project Memory Context'));
-    assert.ok(result.hookSpecificOutput!.additionalContext.includes('session #1'));
+    assert.ok(result.hookSpecificOutput, 'hookSpecificOutput should be defined');
+    assert.equal(result.hookSpecificOutput.hookEventName, 'SessionStart');
+    assert.ok(result.hookSpecificOutput.additionalContext.includes('# Project Memory Context'));
+    assert.ok(result.hookSpecificOutput.additionalContext.includes('session #1'));
     cleanup(db, dir);
   });
 
@@ -42,7 +42,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    assert.ok(result.hookSpecificOutput!.additionalContext.includes('session #3'));
+    assert.ok(result.hookSpecificOutput);
+    assert.ok(result.hookSpecificOutput.additionalContext.includes('session #3'));
     cleanup(db, dir);
   });
 
@@ -72,7 +73,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
 
     // Use a CWD with all segments < 3 chars so no CWD signals are produced
     const result = await handleSessionStart(db, { cwd: '/a/bb' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('Key Knowledge'));
     assert.ok(ctx.includes('Project Architecture'));
@@ -95,7 +97,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     const occurrences = ctx.split('Shared Memory').length - 1;
     assert.ok(occurrences <= 1, `Memory appeared ${occurrences} times, expected at most 1`);
@@ -125,7 +128,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     const keyKnowledgeIdx = ctx.indexOf('## Key Knowledge');
     if (keyKnowledgeIdx >= 0) {
@@ -149,7 +153,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('Recent Sessions'));
     assert.ok(ctx.includes('authentication module'));
@@ -170,36 +175,38 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('Patterns & Conventions'));
     assert.ok(ctx.includes('Error Handling Pattern'));
     cleanup(db, dir);
   });
 
-  it('runs auto-consolidation after 10 sessions', async () => {
-    db.setSessionMeta('session_count', '9');
-    db.setSessionMeta('last_consolidation', '0');
+  it('runs auto-consolidation when accumulated weight exceeds threshold', async () => {
+    db.setSessionMeta('session_count', '5');
+    db.setSessionMeta('last_consolidation', '3');
+    db.setSessionMeta('consolidation_weight', '11.0');
 
     // Add some memories so consolidation has something to process
     seedMemory(db, 'sem-1', { type: 'semantic', content: 'fact one', importance: 0.5 }, 1);
     seedMemory(db, 'ep-1', { type: 'episodic', content: 'event one', importance: 0.5 }, 2);
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
-    // Should NOT include old "Consolidation Due" prompt — consolidation is now automated
     assert.ok(!ctx.includes('Consolidation Due'), 'Should not show old consolidation prompt');
-    // Session count should be updated
-    assert.ok(ctx.includes('session #10'));
-    // last_consolidation should be updated
-    assert.equal(db.getSessionMeta('last_consolidation'), '10');
+    assert.ok(ctx.includes('session #6'));
+    assert.equal(db.getSessionMeta('last_consolidation'), '6');
+    assert.equal(db.getSessionMeta('consolidation_weight'), '0');
     cleanup(db, dir);
   });
 
   it('auto-consolidation deletes stale memories', async () => {
-    db.setSessionMeta('session_count', '9');
-    db.setSessionMeta('last_consolidation', '0');
+    db.setSessionMeta('session_count', '5');
+    db.setSessionMeta('last_consolidation', '3');
+    db.setSessionMeta('consolidation_weight', '15.0');
 
     const oldDate = new Date(Date.now() - 61 * 24 * 60 * 60 * 1000).toISOString();
     seedMemory(
@@ -218,7 +225,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
 
     const beforeCount = db.countMemories();
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
     const afterCount = db.countMemories();
 
     assert.ok(afterCount < beforeCount, 'Stale memory should be deleted');
@@ -226,12 +234,60 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     cleanup(db, dir);
   });
 
-  it('does not trigger consolidation before 10 sessions', async () => {
-    db.setSessionMeta('session_count', '3');
-    db.setSessionMeta('last_consolidation', '0');
+  it('includes relevance scores in Key Knowledge section', async () => {
+    seedMemory(
+      db,
+      'sem-score',
+      {
+        type: 'semantic',
+        title: 'Score Test',
+        content: 'Memory with visible score',
+        importance: 0.8,
+      },
+      1,
+    );
+
+    const result = await handleSessionStart(db, { cwd: '/a/bb' });
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
+
+    assert.ok(ctx.includes('*(score:'), 'Key Knowledge should include relevance score');
+    assert.ok(/\*\(score: \d+\.\d{2}\)\*/.test(ctx), 'Score should be formatted as *(score: X.XX)*');
+    cleanup(db, dir);
+  });
+
+  it('does not include score in Recent Sessions section', async () => {
+    seedMemory(
+      db,
+      'ep-noscore',
+      {
+        type: 'episodic',
+        content: 'Session without score indicator',
+      },
+      1,
+    );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
+
+    const recentIdx = ctx.indexOf('## Recent Sessions');
+    if (recentIdx >= 0) {
+      const nextSectionIdx = ctx.indexOf('\n##', recentIdx + 1);
+      const section = nextSectionIdx >= 0 ? ctx.slice(recentIdx, nextSectionIdx) : ctx.slice(recentIdx);
+      assert.ok(!section.includes('*(score:'), 'Recent Sessions should not include scores');
+    }
+    cleanup(db, dir);
+  });
+
+  it('does not trigger consolidation when weight is below threshold', async () => {
+    db.setSessionMeta('session_count', '3');
+    db.setSessionMeta('last_consolidation', '0');
+    db.setSessionMeta('consolidation_weight', '2.5');
+
+    const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(!ctx.includes('Consolidation Due'));
     cleanup(db, dir);
@@ -249,7 +305,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     );
 
     const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const ctx = result.hookSpecificOutput!.additionalContext;
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
 
     assert.ok(ctx.includes('1 working cleared'));
     cleanup(db, dir);

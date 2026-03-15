@@ -3,6 +3,7 @@ import type { MemoryDatabase } from './database.js';
 import type { MemoryRow, MemoryType, RelationType } from './types.js';
 import { generateEmbeddings } from './embeddings.js';
 import { buildMergeUpdates, normalizeTags } from './merge-utils.js';
+import { THRESHOLDS } from './thresholds.js';
 
 export type Section = {
   title: string;
@@ -67,7 +68,8 @@ function trySplitWithStrategy(content: string, strategy: SplitStrategy, original
     headers.push({ title: extractTitle(match), index: match.index, match });
   }
 
-  const validated = strategy.validateMatch ? headers.filter((h) => strategy.validateMatch!(content, h.match)) : headers;
+  const validateFn = strategy.validateMatch;
+  const validated = validateFn ? headers.filter((h) => validateFn(content, h.match)) : headers;
 
   if (validated.length < MIN_SECTIONS_FOR_SPLIT) return null;
 
@@ -135,7 +137,7 @@ export async function insertSplitSections(
     const emb = embeddings[i];
 
     if (emb) {
-      const similar = db.findSimilarMemory(emb, 0.05, meta.type);
+      const similar = db.findSimilarMemory(emb, THRESHOLDS.EXACT_DUPLICATE, meta.type);
       if (similar) {
         const existing = db.getMemoryByIdRaw(similar.id);
         if (existing) {
@@ -173,6 +175,7 @@ export async function insertSplitSections(
       updated_at: now,
       access_count: 0,
       last_accessed: null,
+      injection_count: 0,
     };
     db.insertMemory(row);
 

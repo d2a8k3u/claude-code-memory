@@ -23,6 +23,7 @@ function makeScoredRow(overrides: Partial<ScoredMemoryRow> & { id: string }): Sc
     updated_at: now,
     access_count: 0,
     last_accessed: null,
+    injection_count: 0,
     score: 0.5,
     textScore: 0.3,
     ...overrides,
@@ -120,7 +121,8 @@ describe('rerankResults — integration', () => {
         assert.ok(r.score >= 0 && r.score <= 1, `Score ${r.score} should be in [0, 1]`);
       }
       // textScore should be preserved from original
-      const relevantResult = results.find((r) => r.id === 'relevant')!;
+      const relevantResult = results.find((r) => r.id === 'relevant');
+      assert.ok(relevantResult, 'relevant result should exist');
       assert.equal(relevantResult.textScore, 0.3, 'textScore should be preserved');
     } else {
       // Model not available (e.g. CI without model cache) — still passes

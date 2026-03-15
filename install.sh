@@ -72,11 +72,28 @@ echo "Installing skills..."
 SKILLS_SRC="$SCRIPT_DIR/skills"
 SKILLS_DST="$HOME/.claude/skills"
 if [ -d "$SKILLS_SRC" ]; then
+  # Remove stale symlinks pointing into this plugin's skills directory
+  if [ -d "$SKILLS_DST" ]; then
+    for existing in "$SKILLS_DST"/*/; do
+      [ -L "${existing%/}" ] || continue
+      link_target="$(readlink "${existing%/}")"
+      case "$link_target" in
+        "$SKILLS_SRC"/*)
+          skill_name="$(basename "${existing%/}")"
+          if [ ! -d "$SKILLS_SRC/$skill_name" ]; then
+            rm -f "${existing%/}"
+            echo "  Removed stale skill: $skill_name"
+          fi
+          ;;
+      esac
+    done
+  fi
+  # Link current skills
+  mkdir -p "$SKILLS_DST"
   for skill_dir in "$SKILLS_SRC"/*/; do
     skill_name="$(basename "$skill_dir")"
     target="$SKILLS_DST/$skill_name"
     rm -rf "$target"
-    mkdir -p "$SKILLS_DST"
     ln -s "$skill_dir" "$target"
     echo "  Linked skill: $skill_name"
   done
@@ -189,36 +206,54 @@ MEMORY_SECTION="$MARKER_START
 
 You have project memory via MCP tools (\`memory_store\`, \`memory_search\`, etc.). Use them proactively and automatically — never ask the user before saving or searching.
 
+**Memory is the source of truth for task history, lessons, and project conventions.**
+
 **CRITICAL: The SessionStart hook injects a broad overview of memories based on git signals. This passive context is NOT a substitute for active \`memory_search\` calls. You MUST still search actively throughout the session.**
 
+**Memory search is MANDATORY before any task, no exceptions.**
+Passive SessionStart context does NOT count as active search.
+If memory tools are unavailable, say so explicitly before starting.
+
 ### When to search (\`memory_search\`)
+
 - **ALWAYS at the start of any non-trivial task**: search for prior work on the module/feature you are about to touch. Do this BEFORE writing any code.
 - **During work**: whenever you encounter a topic, convention, or decision the user might have discussed before — search memory instead of asking or guessing. The user should never have to say \"check your memory\".
-- Before making architectural decisions: search for prior decisions (type \"pattern\")
+- Before making architectural decisions: search for prior decisions (type \`pattern\`)
 - When encountering errors: search with error message keywords
 - When touching unfamiliar code: search for notes about that module/file
 
-### Auto-saved memories
-The session hooks automatically create memories from your work:
-- **episodic**: Session summaries (task, tools, files, errors) — saved every session
-- **procedural**: Build/test/deploy workflows extracted from successful bash command sequences
-- **semantic**: Technology stack and active module detection from commands and file types
-- **pattern**: Recurring themes detected by clustering similar episodic memories
+### Memory types and what goes where
+
+| Type         | Purpose                                                   |
+| ------------ | --------------------------------------------------------- |
+| \`episodic\`   | What happened this session (task, files, errors, outcome) |
+| \`pattern\`    | Lessons learned, recurring mistakes, correction rules     |
+| \`semantic\`   | Project facts, tech stack, conventions                    |
+| \`procedural\` | Build/test/deploy workflows                               |
+| \`working\`    | Session scratchpad — auto-cleared next session            |
 
 ### When to save manually (\`memory_store\`)
+
 Auto-save covers routine facts. Use \`memory_store\` manually for insights automation might miss:
+
+- After ANY correction from the user → store \`pattern\` memory immediately
 - Important architectural decisions or design rationale
 - Non-obvious bug fixes worth remembering
 - User preferences or project-specific conventions
 - Corrections to auto-created memories
 
-### Rules
-- **Always write memory content and titles in English**, even if the user communicates in another language. Translate if needed. This ensures consistent search and retrieval across sessions.
-- Search before storing to avoid duplicates
-- Be concise: 1-3 sentences per memory
-- Use lowercase hyphenated tags
-- Don't store trivial actions (simple reads, ls commands)
-- Don't ask the user before saving — just do it silently
+### Writing good memories
+
+- **Always write content and titles in English**, even if the user communicates in another language. This ensures consistent search and retrieval.
+- **One topic per memory.** If you have insights about 3 different things, call \`memory_store\` 3 times. Multi-topic memories are harder to search and retrieve.
+- **Lead with the insight or fact, not the backstory.** Write \"The FTS5 index requires porter tokenizer for stemmed search\" — not \"During today's session I discovered that the FTS5 index...\".
+- **Make content searchable.** Use the specific terms someone would search for later — module names, error messages, tool names, file paths.
+- **Don't paste raw data — summarize and reference.** Instead of dumping a config file or log output, describe what matters and note where to find the full source.
+- **Include reasoning for decisions.** \"Chose SQLite over Postgres because the plugin runs per-project with no daemon\" is more useful than \"Uses SQLite\".
+- Search before storing to avoid duplicates.
+- Use lowercase hyphenated tags for categorization.
+- Don't store trivial actions (simple reads, ls commands).
+- Don't ask the user before saving — just do it silently.
 $MARKER_END"
 
 mkdir -p "$(dirname "$CLAUDE_MD")"

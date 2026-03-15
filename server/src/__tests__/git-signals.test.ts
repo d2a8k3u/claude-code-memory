@@ -49,11 +49,12 @@ describe('extractGitSignals', () => {
   });
 
   describe('return type shape', () => {
-    it('always returns all 4 fields as arrays', () => {
+    it('always returns all 5 fields as arrays', () => {
       const signals = extractGitSignals('/tmp/nonexistent-path-xyz');
       assert.ok(Array.isArray(signals.cwd));
       assert.ok(Array.isArray(signals.branch));
       assert.ok(Array.isArray(signals.commits));
+      assert.ok(Array.isArray(signals.commitMessages));
       assert.ok(Array.isArray(signals.files));
     });
 
@@ -64,12 +65,77 @@ describe('extractGitSignals', () => {
     });
   });
 
+  describe('commitMessages', () => {
+    it('populates commitMessages from current repo', () => {
+      const signals = extractGitSignals(process.cwd());
+      // We're in a git repo with commits, so commitMessages should be populated
+      assert.ok(signals.commitMessages.length > 0);
+      for (const msg of signals.commitMessages) {
+        assert.equal(typeof msg, 'string');
+        assert.ok(msg.length > 0);
+      }
+    });
+
+    it('strips conventional commit prefixes from commitMessages', () => {
+      const signals = extractGitSignals(process.cwd());
+      const prefixRe = /^(feat|fix|chore|docs|refactor|test|style|build|ci|perf|revert)(\([^)]*\))?[!]?:\s*/i;
+      for (const msg of signals.commitMessages) {
+        assert.ok(!prefixRe.test(msg), `commitMessage still has prefix: "${msg}"`);
+      }
+    });
+
+    it('returns at most 3 commitMessages', () => {
+      const signals = extractGitSignals(process.cwd());
+      assert.ok(signals.commitMessages.length <= 3);
+    });
+  });
+
+  describe('stopword filtering', () => {
+    it('filters expanded stopwords from commits keywords', () => {
+      const signals = extractGitSignals(process.cwd());
+      const stopwords = new Set([
+        'the',
+        'and',
+        'for',
+        'with',
+        'from',
+        'that',
+        'this',
+        'have',
+        'been',
+        'add',
+        'update',
+        'remove',
+        'change',
+        'move',
+        'make',
+        'use',
+        'into',
+        'also',
+        'just',
+        'some',
+        'only',
+        'when',
+        'more',
+        'each',
+        'new',
+        'all',
+        'now',
+        'via',
+        'using',
+        'across',
+        'based',
+      ]);
+      for (const keyword of signals.commits) {
+        assert.ok(!stopwords.has(keyword), `stopword "${keyword}" found in commits`);
+      }
+    });
+  });
+
   describe('git repo signals', () => {
     it('extracts branch, commits, and files from current repo', () => {
       const signals = extractGitSignals(process.cwd());
-      // We're in a git repo, so branch should be populated
-      assert.ok(signals.branch.length >= 0); // could be main/HEAD
-      // All values should be lowercase strings
+      assert.ok(signals.branch.length >= 0);
       for (const field of ['cwd', 'branch', 'commits', 'files'] as const) {
         for (const term of signals[field]) {
           assert.equal(typeof term, 'string');
