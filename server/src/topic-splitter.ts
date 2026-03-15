@@ -175,6 +175,7 @@ export async function insertSplitSections(
       updated_at: now,
       access_count: 0,
       last_accessed: null,
+      injection_count: 0,
     };
     db.insertMemory(row);
 

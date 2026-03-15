@@ -17,6 +17,7 @@ function makeRow(overrides: Partial<MemoryRow> = {}): MemoryRow {
     updated_at: '2024-01-01T00:00:00.000Z',
     access_count: 0,
     last_accessed: null,
+    injection_count: 0,
     ...overrides,
   };
 }

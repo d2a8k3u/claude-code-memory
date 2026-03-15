@@ -1,18 +1,12 @@
 import type { MemoryDatabase, ScoredMemoryRow, RelevanceFilterOptions } from '../database.js';
 import type { MemoryRow } from '../types.js';
-import {
-  generateEmbeddings,
-  warmEmbeddingModel,
-  embeddingToBuffer,
-  bufferToEmbedding,
-  cosineSimilarity,
-} from '../embeddings.js';
+import { generateEmbeddings, warmEmbeddingModel } from '../embeddings.js';
 import { warmRerankerModel } from '../reranker.js';
 import type { HookInput, HookOutput } from './types.js';
 import { extractGitSignals } from './git-signals.js';
-import { makeMemoryRecord, derivePatternTitle } from './shared.js';
 import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
 import { safeParseTags } from '../merge-utils.js';
+import { detectAndStorePatterns } from './pattern-detector.js';
 import { THRESHOLDS } from '../thresholds.js';
 import type { ScoringWeights } from '../thresholds.js';
 
@@ -100,7 +94,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   const signals = extractGitSignals(cwd);
   const workingCleaned = db.deleteAllWorkingMemories();
-  const episodicCleaned = db.cleanupOldEpisodicMemories(90);
+  const episodicCleaned = db.cleanupOldEpisodicMemories(60);
   const decayed = db.decayImportance(30, 0.05);
 
   const sessionCount = parseInt(db.getSessionMeta('session_count') ?? '0', 10) + 1;
@@ -258,6 +252,10 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   const { allocated, seenIds } = allocateBudget(contextSections);
 
+  if (seenIds.size > 0) {
+    db.incrementInjectionCount([...seenIds]);
+  }
+
   const sections: string[] = [];
   let isFirstSection = true;
   for (const section of contextSections) {
@@ -270,14 +268,18 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     }
   }
 
+  const accumulatedWeight = parseFloat(db.getSessionMeta('consolidation_weight') ?? '0');
   const lastConsolidation = parseInt(db.getSessionMeta('last_consolidation') ?? '0', 10);
-  const consolidationNeeded = sessionCount - lastConsolidation >= 10;
+  const consolidationNeeded =
+    accumulatedWeight >= THRESHOLDS.CONSOLIDATION_WEIGHT_THRESHOLD ||
+    sessionCount - lastConsolidation >= THRESHOLDS.CONSOLIDATION_SESSION_FALLBACK;
 
   let consolidationNote = '';
   if (consolidationNeeded) {
     try {
       consolidationNote = await autoConsolidate(db);
       db.setSessionMeta('last_consolidation', String(sessionCount));
+      db.setSessionMeta('consolidation_weight', '0');
     } catch {
       // Will retry next session
     }
@@ -384,135 +386,11 @@ async function autoConsolidate(db: MemoryDatabase): Promise<string> {
   }
   if (totalSplit > 0) actions.push(`${totalSplit} memories split by topic`);
 
-  let patternsCreated = 0;
-  const recentEpisodics = db.getRecentEpisodicWithEmbeddings(30, 50);
-
-  const clusterCandidates = recentEpisodics.filter((mem) => {
-    const tags = safeParseTags(mem.tags);
-    if (!tags.includes('session-end')) return false;
-    if (mem.content.includes('[Request interrupted')) return false;
-    return true;
-  });
-
-  if (clusterCandidates.length >= 3) {
-    const existingPatterns = db.getMemoriesByTypeWithEmbeddings('pattern', 20);
-    const clusters: number[][] = [];
-    const assigned = new Set<number>();
-
-    for (let i = 0; i < clusterCandidates.length; i++) {
-      if (assigned.has(i)) continue;
-      const cluster = [i];
-      assigned.add(i);
-
-      const embI = bufferToEmbedding(clusterCandidates[i].embedding);
-      for (let j = i + 1; j < clusterCandidates.length; j++) {
-        if (assigned.has(j)) continue;
-        const embJ = bufferToEmbedding(clusterCandidates[j].embedding);
-        const similarity = cosineSimilarity(embI, embJ);
-        if (similarity >= THRESHOLDS.CLUSTER_MIN && similarity <= THRESHOLDS.CLUSTER_MAX) {
-          cluster.push(j);
-          assigned.add(j);
-        }
-      }
-
-      if (cluster.length >= 3) clusters.push(cluster);
-    }
-
-    const patternTexts: string[] = [];
-    const patternClusters: number[][] = [];
-    const patternQualities: number[] = [];
-
-    for (const cluster of clusters) {
-      const clusterEmbs = cluster.map((idx) => bufferToEmbedding(clusterCandidates[idx].embedding));
-
-      let pairSum = 0;
-      let pairCount = 0;
-      for (let a = 0; a < clusterEmbs.length; a++) {
-        for (let b = a + 1; b < clusterEmbs.length; b++) {
-          pairSum += cosineSimilarity(clusterEmbs[a], clusterEmbs[b]);
-          pairCount++;
-        }
-      }
-      const avgSimilarity = pairCount > 0 ? pairSum / pairCount : 0;
-      if (avgSimilarity < THRESHOLDS.CLUSTER_QUALITY_MIN) continue;
-
-      const dim = 384;
-      const centroid = new Float32Array(dim);
-      for (const emb of clusterEmbs) {
-        for (let d = 0; d < dim; d++) centroid[d] += emb[d];
-      }
-      for (let d = 0; d < dim; d++) centroid[d] /= cluster.length;
-      let norm = 0;
-      for (let d = 0; d < dim; d++) norm += centroid[d] * centroid[d];
-      norm = Math.sqrt(norm);
-      if (norm > 0) for (let d = 0; d < dim; d++) centroid[d] /= norm;
-
-      let covered = false;
-      for (const pat of existingPatterns) {
-        const patEmb = bufferToEmbedding(pat.embedding);
-        if (cosineSimilarity(centroid, patEmb) > THRESHOLDS.PATTERN_OVERLAP) {
-          covered = true;
-          break;
-        }
-      }
-      if (covered) continue;
-
-      const taskDescriptions = cluster
-        .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
-        .filter((t) => t.length > 0);
-      const title = derivePatternTitle(taskDescriptions);
-      const content = `Recurring theme across ${cluster.length} sessions: ${taskDescriptions.join(' | ')}`;
-      patternTexts.push(`${title}: ${content}`);
-      patternClusters.push(cluster);
-      patternQualities.push(avgSimilarity);
-    }
-
-    if (patternTexts.length > 0) {
-      const patternEmbeddings = await generateEmbeddings(patternTexts);
-
-      for (let i = 0; i < patternClusters.length; i++) {
-        const emb = patternEmbeddings[i];
-        if (!emb) continue;
-
-        const similar = db.findSimilarMemory(emb, THRESHOLDS.EXACT_DUPLICATE);
-        if (similar) continue;
-
-        const cluster = patternClusters[i];
-        const taskDescriptions = cluster
-          .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
-          .filter((t) => t.length > 0);
-        const title = derivePatternTitle(taskDescriptions);
-        const content = patternTexts[i].slice(patternTexts[i].indexOf(':') + 2);
-
-        const importance = patternQualities[i] >= THRESHOLDS.CLUSTER_QUALITY_STRONG ? 0.8 : 0.6;
-        const record = makeMemoryRecord('pattern', content, ['auto-pattern'], {
-          title,
-          importance,
-          context: 'auto-consolidation',
-        });
-        record.embedding = embeddingToBuffer(emb);
-        db.insertMemory(record);
-
-        for (const idx of cluster) {
-          try {
-            db.addRelation(record.id, clusterCandidates[idx].id, 'derived_from', 0.7);
-          } catch {
-            // Not critical
-          }
-        }
-        patternsCreated++;
-      }
-    }
-  }
+  const patternsCreated = await detectAndStorePatterns(db);
   if (patternsCreated > 0) actions.push(`${patternsCreated} patterns created`);
 
   const staleDeleted = db.deleteStaleMemories(60, 0.1, 0);
   if (staleDeleted > 0) actions.push(`${staleDeleted} stale deleted`);
 
   return actions.join(', ');
-}
-
-function extractTaskFromEpisodic(content: string): string {
-  const taskMatch = content.match(/\*\*Task:\*\*\s*(.+?)(?:\n|$)/);
-  return taskMatch ? taskMatch[1].trim() : content.slice(0, 100);
 }

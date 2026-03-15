@@ -15,6 +15,7 @@ export type Memory = {
   updated_at: string;
   access_count: number;
   last_accessed: string | null;
+  injection_count: number;
 };
 
 export type MemoryRow = {
@@ -30,6 +31,7 @@ export type MemoryRow = {
   updated_at: string;
   access_count: number;
   last_accessed: string | null;
+  injection_count: number;
 };
 
 export type Relation = {

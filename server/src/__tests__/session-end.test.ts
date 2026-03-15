@@ -7,6 +7,7 @@ import {
   handleSessionEnd,
   parseListContent,
   computeSubstanceScore,
+  computeSessionWeight,
   SUBSTANCE_THRESHOLD,
   isTrivialCommand,
   parseWorkflowCommands,
@@ -938,6 +939,61 @@ describe('deduplicateTaskDescriptions', () => {
   it('preserves all items when no duplicates exist', () => {
     const tasks = ['Fix auth', 'Add tests', 'Update docs'];
     assert.deepEqual(deduplicateTaskDescriptions(tasks), tasks);
+  });
+});
+
+describe('computeSessionWeight', () => {
+  it('returns low weight for trivial session', () => {
+    const weight = computeSessionWeight({
+      taskSummary: 'Hello',
+      toolsUsed: ['Read'],
+      toolCallCount: 1,
+      filesModified: [],
+      filesRead: ['file.ts'],
+      errorCount: 0,
+      memorySearches: 0,
+      memoryStores: 0,
+      bashCommands: [],
+      technologies: [],
+    });
+    assert.ok(weight < 1.0, `Expected low weight, got ${weight}`);
+  });
+
+  it('returns high weight for substantial session', () => {
+    const weight = computeSessionWeight({
+      taskSummary: 'Implement new feature with multiple file changes',
+      toolsUsed: ['Read', 'Edit', 'Write', 'Bash', 'Grep'],
+      toolCallCount: 15,
+      filesModified: ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'],
+      filesRead: ['x.ts', 'y.ts'],
+      errorCount: 2,
+      memorySearches: 3,
+      memoryStores: 2,
+      bashCommands: [
+        { command: 'npm test', success: true, category: 'test' as const },
+        { command: 'npm run build', success: true, category: 'build' as const },
+        { command: 'npm run lint', success: true, category: 'lint' as const },
+      ],
+      technologies: ['typescript'],
+    });
+    assert.ok(weight >= 3.0, `Expected high weight, got ${weight}`);
+  });
+
+  it('caps individual components', () => {
+    const weight = computeSessionWeight({
+      taskSummary: 'Massive session',
+      toolsUsed: [],
+      toolCallCount: 100,
+      filesModified: Array.from({ length: 50 }, (_, i) => `file${i}.ts`),
+      filesRead: [],
+      errorCount: 20,
+      memorySearches: 0,
+      memoryStores: 0,
+      bashCommands: [],
+      technologies: [],
+    });
+    // toolCallCount capped at 20 → 2.0, files capped at 10 → 3.0, errors capped at 5 → 0.5
+    assert.ok(weight <= 6.0, `Expected capped weight, got ${weight}`);
   });
 });
 

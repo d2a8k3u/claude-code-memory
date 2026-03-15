@@ -42,6 +42,7 @@ export function makeMemoryRow(overrides: Partial<MemoryRow> & { id: string }): M
     updated_at: NOW,
     access_count: 0,
     last_accessed: null,
+    injection_count: 0,
     ...overrides,
   };
 }
