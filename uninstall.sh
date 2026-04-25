@@ -45,6 +45,22 @@ if [ -d "$SKILLS_SRC" ]; then
   done
 fi
 
+# Remove command symlinks
+echo "Removing commands..."
+COMMANDS_SRC="$SCRIPT_DIR/commands"
+COMMANDS_DST="$HOME/.claude/commands"
+if [ -d "$COMMANDS_SRC" ]; then
+  for command_file in "$COMMANDS_SRC"/*.md; do
+    [ -f "$command_file" ] || continue
+    command_name="$(basename "$command_file")"
+    target="$COMMANDS_DST/$command_name"
+    if [ -L "$target" ]; then
+      rm "$target"
+      echo "  Removed command: ${command_name%.md}"
+    fi
+  done
+fi
+
 # Remove hooks and permissions from global settings
 echo "Removing hooks and permissions..."
 if [ -f "$SETTINGS_FILE" ]; then
