@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-04-25
+
+### Added
+
+- **`/memory-graph` slash command** — opens the memory graph visualization in the user's default browser at `http://localhost:7337`. The visualization is served by the MCP server's built-in HTTP server and renders all stored memories as a navigable, searchable graph with type filters and draggable nodes. The command performs an identity check via the new `GET /api/identity` endpoint before opening the browser, so when port 7337 is held by another claude-memory project (or a different application), the user is told which session to close instead of being silently shown the wrong project's graph. Installed globally by `install.sh` via symlink into `~/.claude/commands/`.
+- **Autonomous cognitive memory loop** — new hooks replace reliance on Claude's discretion for routine memory ops:
+  - `UserPromptSubmit` hook runs three parallel type-scoped searches (semantic, pattern, and — when the prompt is recall-style — episodic) on every user message, injecting up to 6 compact matches.
+  - `PreToolUse` hook with per-tool dispatch: `Edit`/`Write` surfaces patterns as warning blocks; `Bash` looks up canonical workflows; `Read`/`Grep`/`Glob` injects semantic+episodic; `WebFetch`/`WebSearch` catches "we already researched this".
+  - Stop hook (`session-end`) now runs a turn-extractor: captures user corrections as `pattern` memories, discovers new module/tech facts as `semantic`, and triggers incremental pattern promotion.
+- **Relation graph grows over time**:
+  - `insertWithAutoRelations` funnel — every write path (MCP, SessionEnd, Stop, and internal) goes through one function that validates content, dedups, and creates up to 5 auto-relations (contradicts / extends / relates_to / derived_from).
+  - Co-activation counter (`relation_coactivations` table) — co-injected memories promote to `relates_to` after 3 co-injections.
+  - Periodic relation sweep — every 20 sessions, under-connected nodes are re-examined via vec0 nearest-neighbour search to discover missed connections (500 ms budget, 100 candidates).
+  - Relation weight evolution — decay per session, boost on co-injection, boost on co-access, stale-prune when weight < 0.05 and endpoints are unused.
+- **Type-aware retrieval and decay**:
+  - `TYPE_RELEVANCE`, `TYPE_LIMITS_PER_HOOK`, `TYPE_DECAY`, `TYPE_BOOST_ON_INJECT`, `TYPE_BOOST_ON_ACCESS`, `RELATION_WEIGHT` constants.
+  - Pattern memories decay slowest (−0.01/session) and boost fastest (+0.04 on inject, +0.08 on access); episodics fade fastest (−0.08); semantic and procedural never auto-delete.
+- **Compact injection format** — shared `injection-format` module produces uniform, markdown-stripped output with high-importance patterns starred (`★`) and dated episodics. Warning block variant for `Edit`/`Write` pre-tool-use.
+- **Cluster-aware retrieval** — `relation-walk` module pulls in 1-hop neighbours (weight ≥ 0.5) alongside primary matches; neighbours appear indented under their primary with the relation type.
+- **Cross-hook dedup** — `session-cache.json` sidecar tracks IDs injected this session; subsequent hooks skip them (FIFO cap at 200).
+- **Classifier + recall detector** — heuristic modules for memory-type inference and detecting when a prompt is asking "have we done X?".
+- **`cli cleanup --rewrite-titles`** — idempotent migration command that rewrites legacy `**Task:**`-prefix episodics into prose titles + content.
+- **Extended `memory_health`** — new Relation Graph section with link density, isolated nodes, avg relation weight, strong-relation share, and last sweep session.
+- `relation_coactivations` sidecar table (additive schema change; no migration needed for existing installs).
+
+### Changed
+
+- **`SessionStart` output slimmed** from up to 25 items to ≤ 10; behavioural-reminder block removed (ineffective across 7+ sessions; replaced by the hook-driven loop).
+- **`SessionEnd` episodic content is now prose** — no `**Task:**` / `**Files:**` / `**Tools:**` meta-prefixes. Content leads with the task summary as a sentence followed by factual detail.
+- **MCP `memory_store`** now routes through `insertWithAutoRelations`, ensuring consistent dedup, relation-creation, and content quality across every write path.
+- **Consolidation moves from a 10-session batch to continuous event-triggered subroutines** — dedup on insert, pattern promotion on Stop, decay per SessionStart.
+- Per-type decay replaces the flat `decayImportance(30, 0.05)` call.
+
+### Removed
+
+- The "you MUST call memory_search" behavioural reminder block at SessionStart.
+- Meta-prefix formatting (`**Task:**` etc.) from auto-saved episodic content.
+- Fixed 25-item `SessionStart` cap.
+
 ## [1.1.0] - 2026-03-15
 
 ### Added
