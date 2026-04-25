@@ -35,7 +35,19 @@ These records should exist at most once each. Search for duplicates and merge th
    - Same approach: union all items, update the best, delete the rest
 3. **Tag collision check:** Same as above — rename non-accumulative records' tag to `active-modules-detail`.
 
-### 3. Consolidate episodic records
+### 3. Fix episodic titles
+
+Episodic memories created before v1.2 often have no title, causing their content (starting with `**Task:**` or `**Files modified:**`) to be used as the label. This makes them indistinguishable in graphs and lists.
+
+1. `memory_list(type="episodic", limit=100)` — scan all episodic records
+2. For each record that has **no title** (title is null/empty):
+   - If content starts with `**Task:**` — extract the task text after the marker, strip markdown bold, and use first ~80 chars as the title
+   - If content starts with `**Files modified:**` — derive a title like `"Session: N files in dir1, dir2"`
+   - If content contains both `**Task:**` and `**Files modified:**` lines — prefer the task text for the title
+   - `memory_update(id, { title: derivedTitle })`
+3. Skip records that already have a meaningful title
+
+### 4. Consolidate episodic records
 
 1. `memory_list(type="episodic", limit=50)` — scan through all episodic records
 2. **Delete meaningless records** that match ANY of:
@@ -47,7 +59,7 @@ These records should exist at most once each. Search for duplicates and merge th
    - `session-files` records: If multiple have the same or near-identical file list (>80% overlap), keep only the most recent. Delete the rest.
    - `session-errors` records: Same approach — deduplicate near-identical error records.
 
-### 4. Clean procedural records
+### 5. Clean procedural records
 
 1. `memory_list(type="procedural", limit=50)` — scan through all procedural records
 2. **Delete junk procedurals** that match ANY of:
@@ -58,7 +70,7 @@ These records should exist at most once each. Search for duplicates and merge th
    - Keep the one with the cleanest, shortest command chain
    - Delete the rest
 
-### 5. Clean low-value patterns
+### 6. Clean low-value patterns
 
 1. `memory_list(type="pattern", limit=50)` — scan through all pattern records
 2. **Delete low-value patterns** that match ANY of:
@@ -70,7 +82,7 @@ These records should exist at most once each. Search for duplicates and merge th
    - Identify frequently co-modified files with context about why
    - Capture genuine recurring workflows or decisions
 
-### 6. Split large multi-topic memories
+### 7. Split large multi-topic memories
 
 For each type (`semantic`, `procedural`, `pattern`), run `memory_list` with a reasonable limit (20-50). Identify memories that are:
 - Over 500 characters
@@ -92,11 +104,12 @@ For each candidate:
 - **Mixed content**: If a memory contains both facts and procedures, split by type (store as `semantic` and `procedural` separately).
 - **Lists**: If a memory is a long list, group related items together.
 
-### 7. Report
+### 8. Report
 
 Summarize what was done:
 - Accumulative records deduplicated (before -> after count)
 - Tag collisions fixed
+- Episodic titles fixed (count)
 - Episodic records consolidated (deleted count)
 - Procedural records cleaned (deleted count)
 - Patterns cleaned (deleted count)
@@ -105,7 +118,7 @@ Summarize what was done:
 
 ## Guidelines
 
-- **Default scope is steps 2-6** (full maintenance). Use the argument to narrow scope if needed.
+- **Default scope is steps 2-7** (full maintenance). Use the argument to narrow scope if needed.
 - **Be conservative with deletion.** If unsure whether a record is junk, keep it.
 - **Preserve the best record** when deduplicating — pick the one with the most items, highest importance, or most recent date.
 - **Don't split small memories** — Only process memories >500 chars with multiple topics.
