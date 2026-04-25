@@ -7,8 +7,11 @@ import { extractGitSignals } from './git-signals.js';
 import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
 import { safeParseTags } from '../merge-utils.js';
 import { detectAndStorePatterns } from './pattern-detector.js';
-import { THRESHOLDS } from '../thresholds.js';
+import { THRESHOLDS, TYPE_RELEVANCE, TYPE_LIMITS_PER_HOOK } from '../thresholds.js';
 import type { ScoringWeights } from '../thresholds.js';
+import { formatBlockWithRelations } from './injection-format.js';
+import { expandByRelations } from './relation-walk.js';
+import { resetCache, markInjected } from './session-cache.js';
 
 interface SearchChannel {
   query: string;
@@ -16,6 +19,7 @@ interface SearchChannel {
   scoringWeights?: ScoringWeights;
 }
 
+// Legacy alias — kept for downstream tests (budget-allocation.test.ts).
 export const CONTEXT_BUDGET = {
   total: 25,
   relevant: { min: 3, max: 15 },
@@ -39,6 +43,7 @@ interface ContextSection {
   format: (mem: MemoryRow | ScoredMemoryRow, quality: number) => string;
 }
 
+// allocateBudget is exported and used by budget-allocation.test.ts — keep the contract.
 export function allocateBudget(sections: ContextSection[]): {
   allocated: Map<SectionName, ContextCandidate[]>;
   seenIds: Set<string>;
@@ -86,6 +91,8 @@ export function allocateBudget(sections: ContextSection[]): {
   return { allocated, seenIds };
 }
 
+const SESSION_CAPS = TYPE_LIMITS_PER_HOOK.sessionStart;
+
 export async function handleSessionStart(db: MemoryDatabase, input: HookInput): Promise<HookOutput> {
   const cwd = input.cwd ?? process.cwd();
 
@@ -95,10 +102,25 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   const signals = extractGitSignals(cwd);
   const workingCleaned = db.deleteAllWorkingMemories();
   const episodicCleaned = db.cleanupOldEpisodicMemories(60);
-  const decayed = db.decayImportance(30, 0.05);
+  const { decayed, deleted: stalePruned } = db.decayImportanceByType();
+  const relDecayed = db.decayRelationWeights();
+  const relPruned = db.pruneStaleRelations();
+
+  const lastSweep = parseInt(db.getSessionMeta('last_sweep_session') ?? '0', 10);
+  let sweepCreated = 0;
 
   const sessionCount = parseInt(db.getSessionMeta('session_count') ?? '0', 10) + 1;
   db.setSessionMeta('session_count', String(sessionCount));
+  resetCache(cwd, String(sessionCount));
+
+  if (sessionCount - lastSweep >= 20) {
+    try {
+      const sweep = db.sweepRelations();
+      sweepCreated = sweep.created;
+    } catch {
+      // best-effort
+    }
+  }
 
   const channels: SearchChannel[] = [];
   if (signals.cwd.length > 0)
@@ -145,8 +167,9 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
 
   const sessionFilter: RelevanceFilterOptions = { topicThreshold: 0.08, relevanceThreshold: 0.15 };
 
-  const contextSections: ContextSection[] = [];
+  // --- Phase 1: collect primary candidates (up to SESSION_CAPS.total = 10) ---
 
+  // Gather relevant candidates from multi-channel search, filtered by per-type relevance thresholds.
   const relevantCandidates: ContextCandidate[] = [];
   if (channels.length > 0) {
     const mergedScores = new Map<string, { memory: ScoredMemoryRow; bestScore: number }>();
@@ -168,106 +191,90 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     const ranked = [...mergedScores.values()].sort((a, b) => b.bestScore - a.bestScore);
 
     for (const { memory, bestScore } of ranked) {
+      // Filter out procedural (not surfaced at SessionStart) and apply per-type thresholds.
+      if (memory.type === 'procedural') continue;
+      const threshold = TYPE_RELEVANCE[memory.type as keyof typeof TYPE_RELEVANCE];
+      if (threshold !== undefined && bestScore < threshold) continue;
       relevantCandidates.push({ memory, quality: bestScore });
     }
   }
 
-  contextSections.push({
-    name: 'relevant',
-    heading: '## Relevant to Current Work',
-    candidates: relevantCandidates,
-    format: (mem, quality) => {
-      const titlePart = mem.title ? `**${mem.title}:** ` : '';
+  // Per-type caps for primary selection.
+  const typeCounts: Partial<Record<string, number>> = {};
+  const primaryMemories: MemoryRow[] = [];
+  const seenPrimaryIds = new Set<string>();
 
-      return `- [${mem.type}] ${titlePart}${mem.content} *(score: ${quality.toFixed(2)})*`;
-    },
-  });
-
-  const recentEpisodic = db.getRecentByType('episodic', CONTEXT_BUDGET.episodic.max);
-  contextSections.push({
-    name: 'episodic',
-    heading: '## Recent Sessions',
-    candidates: recentEpisodic.map((mem, i) => ({
-      memory: mem,
-      quality: 0.7 - i * 0.1,
-    })),
-    format: (mem, _quality) => {
-      const date = mem.created_at.slice(0, 10);
-      const ctx = mem.context ? ` (${mem.context})` : '';
-      return `- [${date}]${ctx} ${mem.content}`;
-    },
-  });
-
-  const semanticCandidates: ContextCandidate[] = [];
-
-  if (overviewQuery && overviewEmbedding) {
-    const results = db
-      .hybridSearchMemories(overviewQuery, overviewEmbedding, 20, sessionFilter)
-      .filter((r) => r.type === 'semantic');
-    for (const r of results) semanticCandidates.push({ memory: r, quality: r.score });
-  } else {
-    const mems = db.getTopByImportance('semantic', 0.5, CONTEXT_BUDGET.semantic.max);
-    for (const m of mems) semanticCandidates.push({ memory: m, quality: m.importance });
-  }
-  contextSections.push({
-    name: 'semantic',
-    heading: '## Key Knowledge',
-    candidates: semanticCandidates,
-    format: (mem, quality) => {
-      const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content} *(score: ${quality.toFixed(2)})*`;
-    },
-  });
-
-  const patterns = db.getTopByImportance('pattern', 0, CONTEXT_BUDGET.pattern.max);
-  contextSections.push({
-    name: 'pattern',
-    heading: '## Patterns & Conventions',
-    candidates: patterns.map((m) => ({ memory: m, quality: m.importance })),
-    format: (mem, quality) => {
-      const title = mem.title ?? 'Untitled pattern';
-      return `- **${title}:** ${mem.content} *(score: ${quality.toFixed(2)})*`;
-    },
-  });
-
-  const proceduralCandidates: ContextCandidate[] = [];
-  if (overviewQuery && overviewEmbedding) {
-    const results = db
-      .hybridSearchMemories(overviewQuery, overviewEmbedding, 15, sessionFilter)
-      .filter((r) => r.type === 'procedural');
-    for (const r of results) proceduralCandidates.push({ memory: r, quality: r.score });
-  } else {
-    const mems = db.getTopByImportance('procedural', 0.5, CONTEXT_BUDGET.procedural.max);
-    for (const m of mems) proceduralCandidates.push({ memory: m, quality: m.importance });
-  }
-  contextSections.push({
-    name: 'procedural',
-    heading: '## Procedures',
-    candidates: proceduralCandidates,
-    format: (mem, quality) => {
-      const titlePart = mem.title ? `**${mem.title}:** ` : '';
-      return `- ${titlePart}${mem.content} *(score: ${quality.toFixed(2)})*`;
-    },
-  });
-
-  const { allocated, seenIds } = allocateBudget(contextSections);
-
-  if (seenIds.size > 0) {
-    db.incrementInjectionCount([...seenIds]);
+  // Fill from channel search results first (already quality-ranked).
+  for (const { memory } of relevantCandidates) {
+    if (primaryMemories.length >= SESSION_CAPS.total) break;
+    if (seenPrimaryIds.has(memory.id)) continue;
+    const t = memory.type as keyof typeof SESSION_CAPS;
+    const cap = SESSION_CAPS[t] as number | undefined;
+    if (cap !== undefined && (typeCounts[t] ?? 0) >= cap) continue;
+    primaryMemories.push(memory);
+    seenPrimaryIds.add(memory.id);
+    typeCounts[t] = (typeCounts[t] ?? 0) + 1;
   }
 
-  const sections: string[] = [];
-  let isFirstSection = true;
-  for (const section of contextSections) {
-    const items = allocated.get(section.name) ?? [];
-    if (items.length === 0) continue;
-    sections.push(isFirstSection ? section.heading : `\n${section.heading}`);
-    isFirstSection = false;
-    for (const item of items) {
-      sections.push(section.format(item.memory, item.quality));
+  // Fill remaining slots from static fallbacks (episodic, semantic, pattern) if not already at cap.
+  if (primaryMemories.length < SESSION_CAPS.total) {
+    const episodicCap = SESSION_CAPS.episodic - (typeCounts['episodic'] ?? 0);
+    if (episodicCap > 0) {
+      const recent = db.getRecentByType('episodic', episodicCap);
+      for (const mem of recent) {
+        if (primaryMemories.length >= SESSION_CAPS.total) break;
+        if (seenPrimaryIds.has(mem.id)) continue;
+        primaryMemories.push(mem);
+        seenPrimaryIds.add(mem.id);
+        typeCounts['episodic'] = (typeCounts['episodic'] ?? 0) + 1;
+      }
     }
   }
 
+  if (primaryMemories.length < SESSION_CAPS.total) {
+    const semanticCap = SESSION_CAPS.semantic - (typeCounts['semantic'] ?? 0);
+    if (semanticCap > 0) {
+      const semanticMems = db
+        .getTopByImportance('semantic', 0.5, semanticCap)
+        .filter((m) => !seenPrimaryIds.has(m.id));
+      for (const mem of semanticMems) {
+        if (primaryMemories.length >= SESSION_CAPS.total) break;
+        primaryMemories.push(mem);
+        seenPrimaryIds.add(mem.id);
+        typeCounts['semantic'] = (typeCounts['semantic'] ?? 0) + 1;
+      }
+    }
+  }
+
+  if (primaryMemories.length < SESSION_CAPS.total) {
+    const patternCap = SESSION_CAPS.pattern - (typeCounts['pattern'] ?? 0);
+    if (patternCap > 0) {
+      const patterns = db.getTopByImportance('pattern', 0, patternCap).filter((m) => !seenPrimaryIds.has(m.id));
+      for (const mem of patterns) {
+        if (primaryMemories.length >= SESSION_CAPS.total) break;
+        primaryMemories.push(mem);
+        seenPrimaryIds.add(mem.id);
+        typeCounts['pattern'] = (typeCounts['pattern'] ?? 0) + 1;
+      }
+    }
+  }
+
+  // --- Phase 2: relation-walk expansion ---
+  const neighbours = expandByRelations(db, [...seenPrimaryIds], {
+    maxNeighbors: 2,
+    minWeight: 0.5,
+    dedupSet: new Set(seenPrimaryIds),
+    typeCaps: {},
+  });
+
+  // --- Increment injection counts for primaries and neighbours ---
+  const allInjectedIds = [...seenPrimaryIds, ...neighbours.map((n) => n.memory.id)];
+  if (allInjectedIds.length > 0) {
+    db.incrementInjectionCount(allInjectedIds);
+    markInjected(cwd, allInjectedIds);
+  }
+
+  // --- Auto-consolidation ---
   const accumulatedWeight = parseFloat(db.getSessionMeta('consolidation_weight') ?? '0');
   const lastConsolidation = parseInt(db.getSessionMeta('last_consolidation') ?? '0', 10);
   const consolidationNeeded =
@@ -285,24 +292,31 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     }
   }
 
+  // --- Build output ---
   const cleanupParts: string[] = [];
   if (workingCleaned) cleanupParts.push(`${workingCleaned} working cleared`);
   if (episodicCleaned) cleanupParts.push(`${episodicCleaned} old episodic archived`);
   if (decayed) cleanupParts.push(`${decayed} decayed`);
+  if (stalePruned) cleanupParts.push(`${stalePruned} stale pruned`);
+  if (relDecayed) cleanupParts.push(`${relDecayed} relations decayed`);
+  if (relPruned) cleanupParts.push(`${relPruned} relations pruned`);
+  if (sweepCreated) cleanupParts.push(`${sweepCreated} relations discovered`);
   if (consolidationNote) cleanupParts.push(consolidationNote);
   const cleanupNote = cleanupParts.length > 0 ? ` (${cleanupParts.join(', ')})` : '';
 
-  const header = `# Project Memory Context (${seenIds.size} items loaded, session #${sessionCount})${cleanupNote}\n`;
+  const totalInjected = primaryMemories.length + neighbours.length;
+  const header = `# Project Memory Context (${totalInjected} items loaded, session #${sessionCount})${cleanupNote}\n`;
 
-  const behavioralReminder = `
+  const memoryBlock = formatBlockWithRelations(
+    primaryMemories,
+    neighbours.map((n) => ({ memory: n.memory, relationType: n.relationType })),
+    {
+      sessionNum: sessionCount,
+      heading: '## Recalled Memories',
+    },
+  );
 
----
-**CRITICAL The context above is a broad overview loaded from git signals — it is NOT a substitute for active searching.**
-You MUST call \`memory_search\` silently (without asking the user):
-- **Before starting work** — search for prior work on the module/feature the user is asking about
-- **During work** — whenever you encounter a topic, convention, or decision the user might have discussed before, search memory instead of asking or guessing. The user should never have to say "check your memory" — recall proactively.`;
-
-  const context = header + sections.join('\n') + behavioralReminder;
+  const context = header + (memoryBlock ? '\n' + memoryBlock : '');
 
   return {
     hookSpecificOutput: {

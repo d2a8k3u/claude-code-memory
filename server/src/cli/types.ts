@@ -3,6 +3,8 @@ export type HookInput = {
   transcript_path?: string;
   tool_name?: string;
   tool_output?: string;
+  tool_input?: Record<string, unknown>;
+  prompt?: string;
 };
 
 export type HookOutput = {

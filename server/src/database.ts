@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MemoryRow, Relation, MemoryType, RelationType } from './types.js';
 import { embeddingToBuffer, bufferToEmbedding } from './embeddings.js';
-import { THRESHOLDS } from './thresholds.js';
+import { THRESHOLDS, TYPE_DECAY, RELATION_WEIGHT } from './thresholds.js';
 import type { ScoringWeights } from './thresholds.js';
 
 const SCHEMA_VERSION = 1;
@@ -79,6 +79,20 @@ export class MemoryDatabase {
     }
 
     this.addColumnIfMissing('memories', 'injection_count', 'INTEGER NOT NULL DEFAULT 0');
+
+    // Ensure relation_coactivations table exists (additive for existing installs)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS relation_coactivations (
+        source_id TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_id, target_id),
+        FOREIGN KEY (source_id) REFERENCES memories(id) ON DELETE CASCADE,
+        FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE,
+        CHECK (source_id < target_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_coact_count ON relation_coactivations(count DESC);
+    `);
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -133,6 +147,17 @@ export class MemoryDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS relation_coactivations (
+        source_id TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_id, target_id),
+        FOREIGN KEY (source_id) REFERENCES memories(id) ON DELETE CASCADE,
+        FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE,
+        CHECK (source_id < target_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_coact_count ON relation_coactivations(count DESC);
     `);
   }
 
@@ -453,6 +478,44 @@ export class MemoryDatabase {
       .all(id, id) as Relation[];
   }
 
+  getAllRelations(): Relation[] {
+    return this.db.prepare('SELECT * FROM relations').all() as Relation[];
+  }
+
+  private normalisePair(a: string, b: string): [string, string] {
+    return a < b ? [a, b] : [b, a];
+  }
+
+  incrementCoActivation(a: string, b: string): number {
+    if (a === b) return 0;
+    const [source, target] = this.normalisePair(a, b);
+    const stmt = this.db.prepare(`
+      INSERT INTO relation_coactivations (source_id, target_id, count)
+      VALUES (?, ?, 1)
+      ON CONFLICT(source_id, target_id) DO UPDATE SET count = count + 1
+      RETURNING count
+    `);
+    const row = stmt.get(source, target) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  getCoActivationCount(a: string, b: string): number {
+    if (a === b) return 0;
+    const [source, target] = this.normalisePair(a, b);
+    const row = this.db
+      .prepare('SELECT count FROM relation_coactivations WHERE source_id = ? AND target_id = ?')
+      .get(source, target) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  resetCoActivation(a: string, b: string): void {
+    if (a === b) return;
+    const [source, target] = this.normalisePair(a, b);
+    this.db
+      .prepare('DELETE FROM relation_coactivations WHERE source_id = ? AND target_id = ?')
+      .run(source, target);
+  }
+
   getGraph(id: string, depth = 1, maxNodes = 50): { nodes: MemoryRow[]; relations: Relation[] } {
     const visited = new Set<string>();
     const allRelations: Relation[] = [];
@@ -480,8 +543,12 @@ export class MemoryDatabase {
 
     const nodes = [...visited].map((nid) => this.getMemoryByIdRaw(nid)).filter((n): n is MemoryRow => n !== null);
 
+    // Only keep relations whose both endpoints are inside the visited node set —
+    // otherwise edges leak labels for nodes beyond `depth`.
     const uniqueRelations = allRelations.filter(
       (rel, idx, arr) =>
+        visited.has(rel.source_id) &&
+        visited.has(rel.target_id) &&
         arr.findIndex(
           (r) =>
             r.source_id === rel.source_id && r.target_id === rel.target_id && r.relation_type === rel.relation_type,
@@ -572,6 +639,197 @@ export class MemoryDatabase {
       return result.changes;
     });
     return tx();
+  }
+
+  sweepRelations(opts: { batchSize?: number; neighborCandidates?: number; timeBudgetMs?: number } = {}): {
+    processed: number;
+    created: number;
+  } {
+    const batchSize = opts.batchSize ?? 100;
+    const neighborCandidates = opts.neighborCandidates ?? 20;
+    const timeBudgetMs = opts.timeBudgetMs ?? 500;
+    const start = Date.now();
+
+    const candidates = this.db
+      .prepare(
+        `SELECT m.id, m.type, m.tags, m.rowid AS r,
+          (SELECT COUNT(*) FROM relations r WHERE r.source_id = m.id OR r.target_id = m.id) AS rel_count
+        FROM memories m
+        WHERE m.embedding IS NOT NULL
+        ORDER BY rel_count ASC, m.created_at DESC
+        LIMIT ?`,
+      )
+      .all(batchSize) as Array<{ id: string; type: string; tags: string; r: number; rel_count: number }>;
+
+    let processed = 0;
+    let created = 0;
+
+    for (const c of candidates) {
+      if (Date.now() - start > timeBudgetMs) break;
+      processed++;
+
+      const embRow = this.db
+        .prepare('SELECT embedding FROM memories_vec WHERE rowid = ?')
+        .get(c.r) as { embedding: Buffer } | undefined;
+      if (!embRow?.embedding) continue;
+
+      const neighbours = this.db
+        .prepare(
+          `SELECT v.vec_rowid, v.distance, m.id AS target_id, m.type AS target_type, m.tags AS target_tags
+          FROM (
+            SELECT rowid AS vec_rowid, distance
+            FROM memories_vec
+            WHERE embedding MATCH ?
+            ORDER BY distance
+            LIMIT ?
+          ) v
+          JOIN memories m ON m.rowid = v.vec_rowid`,
+        )
+        .all(embRow.embedding, neighborCandidates) as Array<{
+        vec_rowid: number;
+        distance: number;
+        target_id: string;
+        target_type: string;
+        target_tags: string;
+      }>;
+
+      for (const n of neighbours) {
+        if (Date.now() - start > timeBudgetMs) break;
+        if (n.target_id === c.id) continue;
+
+        const existing = this.db
+          .prepare(
+            `SELECT 1 FROM relations
+            WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)
+            LIMIT 1`,
+          )
+          .get(c.id, n.target_id, n.target_id, c.id);
+        if (existing) continue;
+
+        const similarity = 1 - n.distance;
+        // Same-type near-duplicate not merged → contradicts (drift signal)
+        if (c.type === n.target_type && n.distance < 0.15) {
+          try {
+            this.addRelation(c.id, n.target_id, 'contradicts', Math.max(0, 1 - n.distance));
+            created++;
+            continue;
+          } catch {
+            // dupe
+          }
+        }
+        // Same-type moderate similarity → extends
+        if (c.type === n.target_type && n.distance >= 0.15 && n.distance <= 0.35) {
+          try {
+            this.addRelation(c.id, n.target_id, 'extends', similarity);
+            created++;
+            continue;
+          } catch {
+            // dupe
+          }
+        }
+        // Different types + ≥ 2 shared tags → relates_to
+        if (c.type !== n.target_type) {
+          let cTags: string[] = [];
+          let nTags: string[] = [];
+          try {
+            cTags = JSON.parse(c.tags) as string[];
+          } catch {
+            cTags = [];
+          }
+          try {
+            nTags = JSON.parse(n.target_tags) as string[];
+          } catch {
+            nTags = [];
+          }
+          const shared = cTags.filter((t) => nTags.includes(t)).length;
+          if (shared >= 2) {
+            try {
+              this.addRelation(
+                c.id,
+                n.target_id,
+                'relates_to',
+                Math.min(0.8, 0.3 + 0.1 * shared),
+              );
+              created++;
+            } catch {
+              // dupe
+            }
+          }
+        }
+      }
+    }
+
+    this.setSessionMeta('last_sweep_session', this.getSessionMeta('session_count') ?? '0');
+    return { processed, created };
+  }
+
+  decayRelationWeights(): number {
+    const res = this.db
+      .prepare(`UPDATE relations SET weight = MAX(?, weight - ?)`)
+      .run(RELATION_WEIGHT.floor, RELATION_WEIGHT.decayPerSession);
+    return res.changes;
+  }
+
+  boostRelationOnCoInject(a: string, b: string): void {
+    this.db
+      .prepare(
+        `UPDATE relations
+        SET weight = MIN(1.0, weight + ?)
+        WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)`,
+      )
+      .run(RELATION_WEIGHT.boostOnCoInject, a, b, b, a);
+  }
+
+  boostRelationOnCoAccess(a: string, b: string): void {
+    this.db
+      .prepare(
+        `UPDATE relations
+        SET weight = MIN(1.0, weight + ?)
+        WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)`,
+      )
+      .run(RELATION_WEIGHT.boostOnCoAccess, a, b, b, a);
+  }
+
+  pruneStaleRelations(): number {
+    const res = this.db
+      .prepare(
+        `DELETE FROM relations
+        WHERE weight < ?
+          AND source_id IN (SELECT id FROM memories WHERE access_count = 0)
+          AND target_id IN (SELECT id FROM memories WHERE access_count = 0)`,
+      )
+      .run(RELATION_WEIGHT.floor);
+    return res.changes;
+  }
+
+  decayImportanceByType(): { decayed: number; deleted: number } {
+    const stmt = this.db.prepare(
+      `UPDATE memories SET importance = MAX(0, importance - ?) WHERE type = ? AND importance > 0`,
+    );
+    let decayed = 0;
+    for (const [type, cfg] of Object.entries(TYPE_DECAY)) {
+      const res = stmt.run(cfg.perSession, type);
+      decayed += res.changes;
+    }
+
+    let deleted = 0;
+    for (const [type, cfg] of Object.entries(TYPE_DECAY)) {
+      if (!Number.isFinite(cfg.ageOutDays)) continue;
+      const cutoff = new Date(Date.now() - cfg.ageOutDays * 24 * 60 * 60 * 1000).toISOString();
+      const delStmt = this.db.prepare(`
+        DELETE FROM memories
+        WHERE type = ?
+          AND created_at < ?
+          AND importance < ?
+          AND injection_count = 0
+          AND access_count = 0
+          AND id NOT IN (SELECT source_id FROM relations UNION SELECT target_id FROM relations)
+      `);
+      const r = delStmt.run(type, cutoff, cfg.staleImpThreshold);
+      deleted += r.changes;
+    }
+
+    return { decayed, deleted };
   }
 
   decayImportance(daysThreshold: number, decayRate: number): number {
@@ -843,6 +1101,14 @@ export class MemoryDatabase {
         topInjected: number;
       };
     };
+    relationStats: {
+      relCount: number;
+      linkDensity: number;
+      isolated: number;
+      avgRelWeight: number;
+      strongRelShare: number;
+      lastSweep: number;
+    };
   } {
     const total = this.countMemories();
 
@@ -931,6 +1197,25 @@ export class MemoryDatabase {
         .get(d7d) as { count: number }
     ).count;
 
+    // Relation graph metrics
+    const relCount = (this.db.prepare('SELECT COUNT(*) as c FROM relations').get() as { c: number }).c;
+    const linkDensity = total > 0 ? (relCount * 2) / total : 0;
+    const isolated = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) as c FROM memories m
+           WHERE NOT EXISTS (SELECT 1 FROM relations r WHERE r.source_id = m.id OR r.target_id = m.id)`,
+        )
+        .get() as { c: number }
+    ).c;
+    const avgRelWeight =
+      (this.db.prepare('SELECT COALESCE(AVG(weight), 0) as w FROM relations').get() as { w: number }).w ?? 0;
+    const strongRelCount = (
+      this.db.prepare('SELECT COUNT(*) as c FROM relations WHERE weight >= 0.5').get() as { c: number }
+    ).c;
+    const strongRelShare = relCount > 0 ? strongRelCount / relCount : 0;
+    const lastSweep = parseInt(this.getSessionMeta('last_sweep_session') ?? '0', 10);
+
     return {
       total,
       byType,
@@ -950,6 +1235,14 @@ export class MemoryDatabase {
           avgInjectionCount: injectionAgg.avgInjectionCount,
           topInjected: injectionAgg.topInjected,
         },
+      },
+      relationStats: {
+        relCount,
+        linkDensity,
+        isolated,
+        avgRelWeight,
+        strongRelShare,
+        lastSweep,
       },
     };
   }

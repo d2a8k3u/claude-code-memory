@@ -2,12 +2,19 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { statSync } from 'node:fs';
 import type { MemoryDatabase, RelevanceFilterOptions } from './database.js';
-import { generateEmbedding, generateEmbeddings, cosineSimilarity, isEmbeddingsAvailable } from './embeddings.js';
+import {
+  generateEmbedding,
+  generateEmbeddings,
+  cosineSimilarity,
+  isEmbeddingsAvailable,
+  bufferToEmbedding,
+  embeddingToBuffer,
+} from './embeddings.js';
 import { rerankResults, overfetchLimit, isRerankerAvailable } from './reranker.js';
-import { rowToMemory, type Memory, type MemoryType, type RelationType } from './types.js';
+import { rowToMemory, type Memory, type MemoryType, type MemoryRow, type RelationType } from './types.js';
 import { splitByTopics, insertSplitSections } from './topic-splitter.js';
-import { normalizeTags, buildMergeUpdates } from './merge-utils.js';
-import { THRESHOLDS } from './thresholds.js';
+import { normalizeTags, buildMergeUpdates, safeParseTags } from './merge-utils.js';
+import { THRESHOLDS, computeInitialRelationWeight } from './thresholds.js';
 
 export { buildMergeUpdates, normalizeTags, safeParseTags, type MergeInput } from './merge-utils.js';
 
@@ -143,6 +150,12 @@ export const memoryToolDefs = [
       'Health check for debugging the memory system. Returns memory counts, embedding coverage, staleness, age distribution, and session info.',
     schema: {},
   },
+  {
+    name: 'memory_graph_viz',
+    description:
+      'Open the memory graph visualization in the browser. Call this when the user wants to explore, browse, or visualize their project memories as an interactive graph.',
+    schema: {},
+  },
 ] as const;
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }> };
@@ -173,6 +186,8 @@ export async function handleMemoryTool(
       return memoryGraph(db, args);
     case 'memory_health':
       return memoryHealth(db);
+    case 'memory_graph_viz':
+      return memoryGraphViz();
     default:
       return text(`Unknown memory tool: ${toolName}`);
   }
@@ -231,40 +246,12 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
     );
   }
 
-  if (embedding) {
-    const similar = db.findSimilarMemory(embedding, THRESHOLDS.EXACT_DUPLICATE, memType as MemoryType);
-    if (similar) {
-      const existing = db.getMemoryByIdRaw(similar.id);
-      if (existing) {
-        const updates = buildMergeUpdates(existing, {
-          content,
-          title,
-          tags,
-          context: (args.context as string | undefined) ?? null,
-          source,
-        });
-        updates.importance = Math.min(1.0, existing.importance + 0.05);
-        db.updateMemory(similar.id, updates);
-        if (updates.content && updates.content !== existing.content) {
-          db.updateMemoryEmbedding(similar.id, embedding);
-        }
-        return text(
-          `Merged with existing memory ${similar.id} (${((1 - similar.distance) * 100).toFixed(1)}% match). Updated ${
-            Object.keys(updates)
-              .filter((k) => k !== 'importance')
-              .join(', ') || 'importance'
-          }.`,
-        );
-      }
-    }
-  }
-
-  db.insertMemory({
+  const record: MemoryRow & { embedding?: Buffer | null } = {
     id,
     type: memType,
     title,
     content,
-    context: (args.context as string) ?? null,
+    context: (args.context as string | undefined) ?? null,
     source,
     tags: JSON.stringify(tags),
     importance: (args.importance as number) ?? defaultImportance,
@@ -273,49 +260,22 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
     access_count: 0,
     last_accessed: null,
     injection_count: 0,
-  });
+    embedding: embedding ? embeddingToBuffer(embedding) : null,
+  };
 
-  let embeddingStatus = 'none';
-  if (embedding) {
-    db.updateMemoryEmbedding(id, embedding);
-    embeddingStatus = 'generated';
+  const result = await insertWithAutoRelations(db, record, { strictContent: false });
+
+  if (!result.isNew) {
+    return text(`Merged with existing memory ${result.mergedIntoId}. Importance boosted.`);
   }
 
-  let relatedNote = '';
-  if (embedding) {
-    const related = db.findRelatedMemories(embedding, 5);
-    if (related.length > 0) {
-      const contradictionLines: string[] = [];
-      const otherLines: string[] = [];
-
-      for (const c of related) {
-        const mem = db.getMemoryByIdRaw(c.id);
-        if (!mem) continue;
-        const label = mem.title ?? mem.content.slice(0, 80);
-        const similarity = ((1 - c.distance) * 100).toFixed(1);
-
-        if (mem.type === memType) {
-          const weight = parseFloat((1 - c.distance).toFixed(3));
-          db.addRelation(id, mem.id, 'contradicts', weight);
-          contradictionLines.push(`- → contradicts ${c.id} (${similarity}% similar): "${label}" [weight: ${weight}]`);
-        } else {
-          otherLines.push(`- ${c.id} (${similarity}% similar): ${label}`);
-        }
-      }
-
-      if (contradictionLines.length > 0) {
-        relatedNote += `\n\n**Potential contradictions auto-linked:**\n${contradictionLines.join('\n')}`;
-      }
-      if (otherLines.length > 0) {
-        relatedNote += `\n\n**Other related memories (review manually):**\n${otherLines.join('\n')}`;
-      }
-    }
-  }
-
+  const embeddingStatus = record.embedding ? 'generated' : 'none';
   const total = db.countMemories();
-  const titleInfo = title ? `\n**Title:** ${title}` : '';
+  const titleInfo = record.title ? `\n**Title:** ${record.title}` : '';
+  const relNote =
+    result.relationsCreated > 0 ? `\n**Auto-relations:** ${result.relationsCreated} created` : '';
   return text(
-    `Memory stored successfully.\n\n**ID:** ${id}\n**Type:** ${memType}${titleInfo}\n**Tags:** ${tags.join(', ') || '(none)'}\n**Embedding:** ${embeddingStatus}\n**Total memories:** ${total}${relatedNote}`,
+    `Memory stored successfully.\n\n**ID:** ${result.id}\n**Type:** ${memType}${titleInfo}\n**Tags:** ${tags.join(', ') || '(none)'}\n**Embedding:** ${embeddingStatus}${relNote}\n**Total memories:** ${total}`,
   );
 }
 
@@ -675,6 +635,20 @@ function memoryGraph(db: MemoryDatabase, args: Record<string, unknown>): ToolRes
   return text(result);
 }
 
+function memoryGraphViz(): ToolResult {
+  const url = 'http://localhost:7337';
+  const platform = process.platform;
+  const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
+
+  import('node:child_process').then(({ exec }) => {
+    exec(`${cmd} ${url}`, (err) => {
+      if (err) process.stderr.write(`Warning: could not open browser: ${err.message}\n`);
+    });
+  });
+
+  return text(`Opening memory graph at ${url}`);
+}
+
 async function memoryHealth(db: MemoryDatabase): Promise<ToolResult> {
   const stats = db.getHealthStats();
   const embAvailable = await isEmbeddingsAvailable();
@@ -727,7 +701,15 @@ ${typeLines}
 - **Avg importance:** ${stats.qualityMetrics.avgImportance.toFixed(2)}
 - **Importance distribution:** low(<0.3): ${stats.qualityMetrics.importanceDistribution.low ?? 0} | mid: ${stats.qualityMetrics.importanceDistribution.medium ?? 0} | high(>=0.7): ${stats.qualityMetrics.importanceDistribution.high ?? 0}
 - **Injections:** ${stats.qualityMetrics.injectionStats.totalInjections} total, avg ${stats.qualityMetrics.injectionStats.avgInjectionCount.toFixed(1)}/memory, max ${stats.qualityMetrics.injectionStats.topInjected}
-- **Never injected (>7d):** ${stats.qualityMetrics.injectionStats.neverInjected} memories`;
+- **Never injected (>7d):** ${stats.qualityMetrics.injectionStats.neverInjected} memories
+
+## Relation Graph
+- **Relations:** ${stats.relationStats.relCount}
+- **Link density:** ${stats.relationStats.linkDensity.toFixed(2)} per memory
+- **Isolated nodes:** ${stats.relationStats.isolated}
+- **Avg relation weight:** ${stats.relationStats.avgRelWeight.toFixed(2)}
+- **Strong relation share (w >= 0.5):** ${(stats.relationStats.strongRelShare * 100).toFixed(1)}%
+- **Last sweep:** session #${stats.relationStats.lastSweep}`;
 
   return text(report);
 }
@@ -758,4 +740,194 @@ ${m.content}`;
 
 function text(t: string): ToolResult {
   return { content: [{ type: 'text', text: t }] };
+}
+
+// --- insertWithAutoRelations funnel ---
+
+export interface InsertWithAutoRelationsOptions {
+  /** Throw on meta-prefix content; plugin paths use true, MCP uses false. */
+  strictContent?: boolean;
+  /** Generate embedding if the record arrives without one. */
+  generateEmbeddingIfMissing?: boolean;
+}
+
+export interface InsertWithAutoRelationsResult {
+  id: string;
+  isNew: boolean;
+  relationsCreated: number;
+  mergedIntoId?: string;
+}
+
+const META_PREFIX_RE = /^\s*\*\*(Task|Files|Tools|Errors|Memory ops):\*\*/;
+
+function validateContent(content: string, strict: boolean): void {
+  if (META_PREFIX_RE.test(content) && strict) {
+    throw new Error(
+      'Content begins with meta-prefix (**Task:**/**Files:**/**Tools:** etc.) — write natural prose instead.',
+    );
+  }
+}
+
+function deriveTitleFromContent(content: string): string {
+  const stripped = content.replace(/[*_`#>]/g, '').trim();
+  const firstSentence = stripped.split(/(?<=[.!?])\s+/)[0] ?? stripped;
+  return firstSentence.length <= 80 ? firstSentence : firstSentence.slice(0, 77).replace(/\s+\S*$/, '') + '…';
+}
+
+export async function insertWithAutoRelations(
+  db: MemoryDatabase,
+  record: MemoryRow & { embedding?: Buffer | null },
+  options: InsertWithAutoRelationsOptions = {},
+): Promise<InsertWithAutoRelationsResult> {
+  const strict = options.strictContent ?? false;
+
+  validateContent(record.content, strict);
+
+  if (!record.title) {
+    record.title = deriveTitleFromContent(record.content);
+  }
+
+  if (options.generateEmbeddingIfMissing && !record.embedding) {
+    const embText = record.title ? `${record.title}\n\n${record.content}` : record.content;
+    const emb = await generateEmbedding(embText);
+    if (emb) record.embedding = embeddingToBuffer(emb);
+  }
+
+  if (record.embedding) {
+    const similar = db.findSimilarMemory(
+      bufferToEmbedding(record.embedding),
+      THRESHOLDS.EXACT_DUPLICATE,
+      record.type as MemoryType,
+    );
+    if (similar) {
+      const existing = db.getMemoryByIdRaw(similar.id);
+      if (existing) {
+        const updates = buildMergeUpdates(existing, {
+          content: record.content,
+          title: record.title,
+          tags: safeParseTags(record.tags),
+          context: record.context,
+          source: record.source,
+        });
+        updates.importance = Math.min(1.0, existing.importance + 0.05);
+        db.updateMemory(similar.id, updates);
+        if (updates.content && updates.content !== existing.content) {
+          db.updateMemoryEmbedding(similar.id, bufferToEmbedding(record.embedding));
+        }
+        return { id: similar.id, isNew: false, relationsCreated: 0, mergedIntoId: similar.id };
+      }
+    }
+  }
+
+  db.insertMemory(record);
+
+  const relationsCreated = await computeAndInsertAutoRelations(db, record);
+
+  return { id: record.id, isNew: true, relationsCreated };
+}
+
+interface RelationCandidate {
+  targetId: string;
+  relationType: RelationType;
+  weight: number;
+  similarity: number;
+  priority: number;
+}
+
+const RELATION_PRIORITY: Record<string, number> = {
+  contradicts: 0,
+  derived_from: 1,
+  extends: 2,
+  relates_to: 3,
+};
+
+async function computeAndInsertAutoRelations(
+  db: MemoryDatabase,
+  record: MemoryRow & { embedding?: Buffer | null },
+): Promise<number> {
+  if (!record.embedding) return 0;
+
+  const emb = bufferToEmbedding(record.embedding);
+  const candidates: RelationCandidate[] = [];
+
+  const related = db.findRelatedMemories(emb, 10);
+  const recordTags = new Set(safeParseTags(record.tags));
+  const recordTime = Date.parse(record.created_at);
+
+  for (const rel of related) {
+    if (rel.id === record.id) continue;
+    const other = db.getMemoryByIdRaw(rel.id);
+    if (!other) continue;
+
+    const similarity = 1 - rel.distance;
+    const otherTags = new Set(safeParseTags(other.tags));
+    const sharedTagCount = [...recordTags].filter((t) => otherTags.has(t)).length;
+    const sameType = other.type === record.type;
+    const otherTime = Date.parse(other.created_at);
+    const hourDiff = Math.abs(recordTime - otherTime) / (1000 * 60 * 60);
+
+    if (sameType && rel.distance < 0.15) {
+      candidates.push({
+        targetId: other.id,
+        relationType: 'contradicts',
+        weight: computeInitialRelationWeight('contradicts', { cosineDistance: rel.distance }),
+        similarity,
+        priority: RELATION_PRIORITY.contradicts,
+      });
+      continue;
+    }
+
+    if (sameType && rel.distance >= 0.15 && rel.distance < THRESHOLDS.RELATED_UPPER) {
+      candidates.push({
+        targetId: other.id,
+        relationType: 'extends',
+        weight: computeInitialRelationWeight('extends', { similarity }),
+        similarity,
+        priority: RELATION_PRIORITY.extends,
+      });
+      continue;
+    }
+
+    if (hourDiff < 24 && other.context && record.context && other.context === record.context) {
+      candidates.push({
+        targetId: other.id,
+        relationType: 'derived_from',
+        weight: computeInitialRelationWeight('derived_from', {}),
+        similarity,
+        priority: RELATION_PRIORITY.derived_from,
+      });
+      continue;
+    }
+
+    if (!sameType && sharedTagCount >= 2) {
+      candidates.push({
+        targetId: other.id,
+        relationType: 'relates_to',
+        weight: computeInitialRelationWeight('relates_to', { sharedTagCount }),
+        similarity,
+        priority: RELATION_PRIORITY.relates_to,
+      });
+    }
+  }
+
+  candidates.sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority - b.priority;
+    return b.similarity - a.similarity;
+  });
+
+  let created = 0;
+  const seen = new Set<string>();
+  for (const c of candidates) {
+    if (created >= 5) break;
+    if (seen.has(c.targetId)) continue;
+    seen.add(c.targetId);
+    try {
+      db.addRelation(record.id, c.targetId, c.relationType, c.weight);
+      created++;
+    } catch {
+      // relation already exists — ignore
+    }
+  }
+
+  return created;
 }
