@@ -30,7 +30,9 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
   });
 
   it('returns valid output with no memories and no git signals', async () => {
-    const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
+    // Use a CWD with all path segments < 3 chars so extractGitSignals produces
+    // no CWD-derived signals — that is the actual no-signals path.
+    const result = await handleSessionStart(db, { cwd: '/a/bb' });
     assert.ok(result.hookSpecificOutput, 'hookSpecificOutput should be defined');
     assert.equal(result.hookSpecificOutput.hookEventName, 'SessionStart');
     assert.ok(result.hookSpecificOutput.additionalContext.includes('# Project Memory Context'));
@@ -39,9 +41,9 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
   });
 
   it('increments session count', async () => {
-    await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
+    await handleSessionStart(db, { cwd: '/a/bb' });
+    await handleSessionStart(db, { cwd: '/a/bb' });
+    const result = await handleSessionStart(db, { cwd: '/a/bb' });
     assert.ok(result.hookSpecificOutput);
     assert.ok(result.hookSpecificOutput.additionalContext.includes('session #3'));
     cleanup(db, dir);
@@ -76,10 +78,8 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     assert.ok(result.hookSpecificOutput);
     const ctx = result.hookSpecificOutput.additionalContext;
 
-    assert.ok(ctx.includes('Key Knowledge'));
+    // New format: memories appear as compact lines, not under old section headings
     assert.ok(ctx.includes('Project Architecture'));
-    assert.ok(ctx.includes('Procedures'));
-    assert.ok(ctx.includes('Deploy Process'));
     cleanup(db, dir);
   });
 
@@ -101,11 +101,11 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     const ctx = result.hookSpecificOutput.additionalContext;
 
     const occurrences = ctx.split('Shared Memory').length - 1;
-    assert.ok(occurrences <= 1, `Memory appeared ${occurrences} times, expected at most 1`);
+    assert.equal(occurrences, 1, `Memory must appear exactly once, got ${occurrences}`);
     cleanup(db, dir);
   });
 
-  it('includes Key Knowledge section with only semantic memories when using static fallback', async () => {
+  it('surfaces semantic memories in compact format', async () => {
     seedMemory(
       db,
       'sem-1',
@@ -131,16 +131,13 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     assert.ok(result.hookSpecificOutput);
     const ctx = result.hookSpecificOutput.additionalContext;
 
-    const keyKnowledgeIdx = ctx.indexOf('## Key Knowledge');
-    if (keyKnowledgeIdx >= 0) {
-      const nextSectionIdx = ctx.indexOf('\n##', keyKnowledgeIdx + 1);
-      const section = nextSectionIdx >= 0 ? ctx.slice(keyKnowledgeIdx, nextSectionIdx) : ctx.slice(keyKnowledgeIdx);
-      assert.ok(!section.includes('[episodic]'), 'Key Knowledge should not contain episodic memories');
-    }
+    // Compact format must tag the memory type with [semantic] — verifying the
+    // format header specifically, not just that some memory content appeared.
+    assert.ok(ctx.includes('[semantic]'), 'semantic memory must be labelled with [semantic] in compact format');
     cleanup(db, dir);
   });
 
-  it('includes recent episodic memories in Recent Sessions', async () => {
+  it('includes recent episodic memories in output', async () => {
     seedMemory(
       db,
       'ep-1',
@@ -156,12 +153,11 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     assert.ok(result.hookSpecificOutput);
     const ctx = result.hookSpecificOutput.additionalContext;
 
-    assert.ok(ctx.includes('Recent Sessions'));
     assert.ok(ctx.includes('authentication module'));
     cleanup(db, dir);
   });
 
-  it('includes patterns section', async () => {
+  it('includes pattern memories in output', async () => {
     seedMemory(
       db,
       'pat-1',
@@ -178,7 +174,6 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     assert.ok(result.hookSpecificOutput);
     const ctx = result.hookSpecificOutput.additionalContext;
 
-    assert.ok(ctx.includes('Patterns & Conventions'));
     assert.ok(ctx.includes('Error Handling Pattern'));
     cleanup(db, dir);
   });
@@ -234,52 +229,6 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     cleanup(db, dir);
   });
 
-  it('includes relevance scores in Key Knowledge section', async () => {
-    seedMemory(
-      db,
-      'sem-score',
-      {
-        type: 'semantic',
-        title: 'Score Test',
-        content: 'Memory with visible score',
-        importance: 0.8,
-      },
-      1,
-    );
-
-    const result = await handleSessionStart(db, { cwd: '/a/bb' });
-    assert.ok(result.hookSpecificOutput);
-    const ctx = result.hookSpecificOutput.additionalContext;
-
-    assert.ok(ctx.includes('*(score:'), 'Key Knowledge should include relevance score');
-    assert.ok(/\*\(score: \d+\.\d{2}\)\*/.test(ctx), 'Score should be formatted as *(score: X.XX)*');
-    cleanup(db, dir);
-  });
-
-  it('does not include score in Recent Sessions section', async () => {
-    seedMemory(
-      db,
-      'ep-noscore',
-      {
-        type: 'episodic',
-        content: 'Session without score indicator',
-      },
-      1,
-    );
-
-    const result = await handleSessionStart(db, { cwd: '/tmp/no-git-here-xyz' });
-    assert.ok(result.hookSpecificOutput);
-    const ctx = result.hookSpecificOutput.additionalContext;
-
-    const recentIdx = ctx.indexOf('## Recent Sessions');
-    if (recentIdx >= 0) {
-      const nextSectionIdx = ctx.indexOf('\n##', recentIdx + 1);
-      const section = nextSectionIdx >= 0 ? ctx.slice(recentIdx, nextSectionIdx) : ctx.slice(recentIdx);
-      assert.ok(!section.includes('*(score:'), 'Recent Sessions should not include scores');
-    }
-    cleanup(db, dir);
-  });
-
   it('does not trigger consolidation when weight is below threshold', async () => {
     db.setSessionMeta('session_count', '3');
     db.setSessionMeta('last_consolidation', '0');
@@ -310,5 +259,25 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
 
     assert.ok(ctx.includes('1 working cleared'));
     cleanup(db, dir);
+  });
+
+  it('session-start output is compact and has no behavioural reminder', async () => {
+    const { db: testDb, dir: testDir } = makeTempDb();
+    try {
+      for (let i = 0; i < 30; i++) {
+        testDb.insertMemory(makeMemoryRow({ id: `m${i}`, type: 'semantic' }));
+      }
+      const result = await handleSessionStart(testDb, { cwd: process.cwd() });
+      const ctx = result.hookSpecificOutput?.additionalContext ?? '';
+      assert.doesNotMatch(ctx, /CRITICAL/);
+      assert.doesNotMatch(ctx, /MUST call `memory_search`/);
+      assert.doesNotMatch(ctx, /behavioural reminder/i);
+      const itemCount = (ctx.match(/^- \[/gm) ?? []).length;
+      assert.ok(itemCount <= 10, `expected <= 10 items, got ${itemCount}`);
+    } finally {
+      testDb.close();
+      const { rmSync } = await import('node:fs');
+      rmSync(testDir, { recursive: true });
+    }
   });
 });

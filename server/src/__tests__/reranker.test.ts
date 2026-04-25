@@ -87,13 +87,28 @@ describe('rerankResults — fallback', () => {
 // rerankResults — integration (loads real model)
 // ==========================================================
 describe('rerankResults — integration', () => {
-  it('warmRerankerModel does not throw', () => {
+  it('warmRerankerModel makes the reranker available afterwards', async (t) => {
     resetRerankerState();
-    assert.doesNotThrow(() => warmRerankerModel());
+    warmRerankerModel();
+    // Allow the async warmup a brief window then probe — if the model is
+    // available, the warmup must have set state such that isRerankerAvailable
+    // returns true. If the model is unavailable in this env, the contract is
+    // simply that warmRerankerModel does not crash the process; skip the
+    // positive assertion.
+    const available = await isRerankerAvailable();
+    if (!available) {
+      t.skip('reranker model unavailable in test environment');
+      return;
+    }
+    assert.equal(available, true, 'warmRerankerModel must leave the reranker in an available state');
   });
 
-  it('reranks candidates by relevance', async () => {
+  it('reranks candidates by relevance', async (t) => {
     resetRerankerState();
+    if (!(await isRerankerAvailable())) {
+      t.skip('reranker model unavailable — cannot test reranking');
+      return;
+    }
 
     const candidates = [
       makeScoredRow({
@@ -114,26 +129,22 @@ describe('rerankResults — integration', () => {
 
     const { results, reranked } = await rerankResults('typescript type checking configuration', candidates, 10);
 
-    if (reranked) {
-      assert.equal(results[0].id, 'relevant', 'Cross-encoder should rank TypeScript content higher for TS query');
-      // Scores should be in [0, 1]
-      for (const r of results) {
-        assert.ok(r.score >= 0 && r.score <= 1, `Score ${r.score} should be in [0, 1]`);
-      }
-      // textScore should be preserved from original
-      const relevantResult = results.find((r) => r.id === 'relevant');
-      assert.ok(relevantResult, 'relevant result should exist');
-      assert.equal(relevantResult.textScore, 0.3, 'textScore should be preserved');
-    } else {
-      // Model not available (e.g. CI without model cache) — still passes
-      assert.ok(true, 'Model unavailable, fallback used');
+    assert.equal(reranked, true, 'reranker must run when the model is available');
+    assert.equal(results[0].id, 'relevant', 'cross-encoder must rank TypeScript content above cooking for a TS query');
+    for (const r of results) {
+      assert.ok(r.score >= 0 && r.score <= 1, `Score ${r.score} should be in [0, 1]`);
     }
+    const relevantResult = results.find((r) => r.id === 'relevant');
+    assert.ok(relevantResult, 'relevant result must exist');
+    assert.equal(relevantResult.textScore, 0.3, 'textScore must be preserved across reranking');
   });
 
-  it('isRerankerAvailable returns boolean', async () => {
+  it('isRerankerAvailable reports a stable boolean across calls', async () => {
     resetRerankerState();
-    const available = await isRerankerAvailable();
-    assert.equal(typeof available, 'boolean');
+    const a = await isRerankerAvailable();
+    const b = await isRerankerAvailable();
+    assert.equal(typeof a, 'boolean');
+    assert.equal(a, b, 'availability must be stable across calls without state changes');
   });
 
   it('respects limit after reranking', async () => {
