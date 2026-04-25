@@ -4,15 +4,27 @@ A [Claude Code](https://claude.ai/download) plugin that gives Claude fully autom
 
 ## Features
 
-- **Auto-loads** relevant context at session start using git signals (branch, commits, modified files)
-- **Auto-saves** a structured session summary when the session ends
-- **Auto-recalls** matching memories when Bash errors occur
-- **Auto-merges** near-duplicate memories on store (≥95% cosine similarity)
-- **Auto-consolidates** based on activity weight — reviews duplicates, stale entries, and emerging patterns
-- **Adaptive context budget** — dynamically allocates injection slots based on result quality, not fixed caps
-- **Two-phase recency scoring** — strongly favors recent work (0–7 days) with gradual long-term decay
-- **Content-length penalty** — prevents verbose, generic memories from dominating search results
-- **Noise filtering** — suppresses trivial sessions, junk procedurals, and low-substance episodics
+- **Autonomous hook loop (v1.2)** — the plugin searches memory on every user prompt, before every file edit, before every Bash command, and when Claude uses Read/Grep/WebFetch. Claude doesn't need to remember to call `memory_search`.
+- **Auto-saves** per turn with a prose summary (no meta-prefix boilerplate); user corrections automatically become `pattern` memories.
+- **Auto-recalls** matching memories when Bash errors occur.
+- **Auto-merges** near-duplicate memories on store (≥95% cosine similarity) and **auto-creates relations** on every write path.
+- **Relation graph grows over time** — co-injected memories promote to `relates_to`; a periodic sweep (every 20 sessions) finds connections missed at insert time; relation weights evolve with usage.
+- **Type-aware decay** — patterns decay slowly and boost aggressively on recall; episodics fade fast; semantic and procedural are permanent unless you delete them.
+- **Cluster-aware retrieval** — when a memory is injected, its strongest neighbours (weight ≥ 0.5) come along.
+- **Compact, markdown-stripped injection format** — no section headers; one line per memory with high-importance patterns starred.
+
+## How Claude uses memory
+
+| When this happens | The plugin does |
+|---|---|
+| You send a prompt | Searches semantic, pattern, and (if recall-style) episodic memory in parallel; injects ≤ 6 compact matches. |
+| Claude is about to Edit/Write a file | Surfaces any pattern memory scoped to that file as a warning. |
+| Claude is about to run a Bash command | Looks up the canonical workflow for that command category (build/test/deploy/…). |
+| Claude Grep/Read/Globs | Injects semantic + episodic context scoped to the path. |
+| A Bash command fails | Pulls relevant error-context memory. |
+| The assistant turn ends | Runs the turn-extractor; stores user corrections as patterns, new facts as semantic; promotes recurring clusters to patterns. |
+
+Claude still has direct access to the MCP tools (`memory_store`, `memory_relate`, `memory_update`, etc.) for judgement-level work — explicit "remember this" requests, overrides, or corrections to auto-saved memories.
 
 All data stays local. Everything is scoped to the current project via the working directory.
 
@@ -68,12 +80,13 @@ Scoring combines text relevance, importance, recency, and access frequency with 
 
 SQLite database at `.claude/memory-db/memory.sqlite` inside each project. Includes FTS5 and vec0 virtual tables for fast search.
 
-### Skills
+### Skills & Commands
 
-| Skill | Description |
-|-------|-------------|
+| Command | Description |
+|---------|-------------|
 | `/memory-init` | Bootstrap project memory from codebase files (README, package.json, git history, etc.) |
 | `/memory-maintain` | Deduplicate, consolidate, clean junk records, and split large memories |
+| `/memory-graph` | Open the memory graph visualization in your browser at `http://localhost:7337` |
 
 <details>
 <summary>Architecture</summary>
@@ -97,6 +110,8 @@ claude-memory/
 ├── skills/
 │   ├── memory-init/              # /memory-init bootstrap skill
 │   └── memory-maintain/          # /memory-maintain cleanup skill
+├── commands/
+│   └── memory-graph.md           # /memory-graph slash command
 ├── agents/memory-curator.md      # Maintenance sub-agent
 └── hooks/hooks.json.template     # Reference hook config
 ```
