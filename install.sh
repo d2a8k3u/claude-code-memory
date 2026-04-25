@@ -99,6 +99,39 @@ if [ -d "$SKILLS_SRC" ]; then
   done
 fi
 
+# Install slash commands globally
+echo "Installing commands..."
+COMMANDS_SRC="$SCRIPT_DIR/commands"
+COMMANDS_DST="$HOME/.claude/commands"
+if [ -d "$COMMANDS_SRC" ]; then
+  # Remove stale symlinks pointing into this plugin's commands directory
+  if [ -d "$COMMANDS_DST" ]; then
+    for existing in "$COMMANDS_DST"/*.md; do
+      [ -L "$existing" ] || continue
+      link_target="$(readlink "$existing")"
+      case "$link_target" in
+        "$COMMANDS_SRC"/*)
+          command_name="$(basename "$existing")"
+          if [ ! -f "$COMMANDS_SRC/$command_name" ]; then
+            rm -f "$existing"
+            echo "  Removed stale command: $command_name"
+          fi
+          ;;
+      esac
+    done
+  fi
+  # Link current commands
+  mkdir -p "$COMMANDS_DST"
+  for command_file in "$COMMANDS_SRC"/*.md; do
+    [ -f "$command_file" ] || continue
+    command_name="$(basename "$command_file")"
+    target="$COMMANDS_DST/$command_name"
+    rm -f "$target"
+    ln -s "$command_file" "$target"
+    echo "  Linked command: ${command_name%.md}"
+  done
+fi
+
 # Add hooks and permissions to global settings
 echo "Configuring hooks and permissions..."
 node -e "
@@ -148,6 +181,28 @@ const hooks = {
           command: 'node ' + pluginDir + '/server/dist/cli.js session-start',
           statusMessage: 'Loading project memory...',
           timeout: 15,
+        },
+      ],
+    },
+  ],
+  UserPromptSubmit: [
+    {
+      hooks: [
+        {
+          type: 'command',
+          command: 'node ' + pluginDir + '/server/dist/cli.js prompt-submit',
+          timeout: 5,
+        },
+      ],
+    },
+  ],
+  PreToolUse: [
+    {
+      hooks: [
+        {
+          type: 'command',
+          command: 'node ' + pluginDir + '/server/dist/cli.js pre-tool-use',
+          timeout: 5,
         },
       ],
     },
@@ -204,56 +259,32 @@ MARKER_END="<!-- claude-memory:end -->"
 MEMORY_SECTION="$MARKER_START
 ## Memory System
 
-You have project memory via MCP tools (\`memory_store\`, \`memory_search\`, etc.). Use them proactively and automatically — never ask the user before saving or searching.
+Your project memory is managed by the claude-memory plugin. The plugin's hooks search memory automatically on every user prompt, before risky edits, before running commands, and when it detects recall-style questions. **You do not need to call \`memory_search\` for routine recall** — the relevant memories arrive as context.
 
-**Memory is the source of truth for task history, lessons, and project conventions.**
+**When you still call the MCP tools directly:**
 
-**CRITICAL: The SessionStart hook injects a broad overview of memories based on git signals. This passive context is NOT a substitute for active \`memory_search\` calls. You MUST still search actively throughout the session.**
+- \`memory_store\` — when the user explicitly says \"remember this\", when you disagree with an auto-saved memory, or when you want to save a judgement-level insight (e.g., a project convention you inferred).
+- \`memory_search\` — when you need to look up something specific the hooks did not surface.
+- \`memory_relate\`, \`memory_update\`, \`memory_delete\` — for curating the graph.
 
-**Memory search is MANDATORY before any task, no exceptions.**
-Passive SessionStart context does NOT count as active search.
-If memory tools are unavailable, say so explicitly before starting.
+### Memory types
 
-### When to search (\`memory_search\`)
-
-- **ALWAYS at the start of any non-trivial task**: search for prior work on the module/feature you are about to touch. Do this BEFORE writing any code.
-- **During work**: whenever you encounter a topic, convention, or decision the user might have discussed before — search memory instead of asking or guessing. The user should never have to say \"check your memory\".
-- Before making architectural decisions: search for prior decisions (type \`pattern\`)
-- When encountering errors: search with error message keywords
-- When touching unfamiliar code: search for notes about that module/file
-
-### Memory types and what goes where
-
-| Type         | Purpose                                                   |
-| ------------ | --------------------------------------------------------- |
-| \`episodic\`   | What happened this session (task, files, errors, outcome) |
-| \`pattern\`    | Lessons learned, recurring mistakes, correction rules     |
-| \`semantic\`   | Project facts, tech stack, conventions                    |
-| \`procedural\` | Build/test/deploy workflows                               |
-| \`working\`    | Session scratchpad — auto-cleared next session            |
-
-### When to save manually (\`memory_store\`)
-
-Auto-save covers routine facts. Use \`memory_store\` manually for insights automation might miss:
-
-- After ANY correction from the user → store \`pattern\` memory immediately
-- Important architectural decisions or design rationale
-- Non-obvious bug fixes worth remembering
-- User preferences or project-specific conventions
-- Corrections to auto-created memories
+| Type         | Purpose                                                      |
+| ------------ | ------------------------------------------------------------ |
+| \`episodic\`   | What happened in sessions (auto-saved)                       |
+| \`pattern\`    | Corrections, rules, user preferences (injected before edits) |
+| \`semantic\`   | Project facts, architecture, conventions                     |
+| \`procedural\` | Build/test/deploy workflows (auto-saved, injected before Bash) |
+| \`working\`    | Session scratchpad (auto-cleared at SessionStart)            |
 
 ### Writing good memories
 
-- **Always write content and titles in English**, even if the user communicates in another language. This ensures consistent search and retrieval.
-- **One topic per memory.** If you have insights about 3 different things, call \`memory_store\` 3 times. Multi-topic memories are harder to search and retrieve.
-- **Lead with the insight or fact, not the backstory.** Write \"The FTS5 index requires porter tokenizer for stemmed search\" — not \"During today's session I discovered that the FTS5 index...\".
-- **Make content searchable.** Use the specific terms someone would search for later — module names, error messages, tool names, file paths.
-- **Don't paste raw data — summarize and reference.** Instead of dumping a config file or log output, describe what matters and note where to find the full source.
-- **Include reasoning for decisions.** \"Chose SQLite over Postgres because the plugin runs per-project with no daemon\" is more useful than \"Uses SQLite\".
-- Search before storing to avoid duplicates.
-- Use lowercase hyphenated tags for categorization.
-- Don't store trivial actions (simple reads, ls commands).
-- Don't ask the user before saving — just do it silently.
+- Always write content and titles in English, even if the user communicates in another language.
+- One topic per memory.
+- Lead with the insight or fact, not the backstory.
+- Use the specific terms someone would search for later — file paths, module names, error signatures.
+- Include reasoning for decisions.
+- Don't store trivial actions. Don't ask before saving — just do it silently.
 $MARKER_END"
 
 mkdir -p "$(dirname "$CLAUDE_MD")"
