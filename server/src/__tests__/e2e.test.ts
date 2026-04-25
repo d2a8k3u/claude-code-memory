@@ -176,26 +176,22 @@ describe('E2E: Semantic Search with Real Embeddings', { timeout: 60_000 }, () =>
       title: 'JVM Garbage Collection',
     });
 
-    // Search with a semantically related but non-exact query
+    // The hybrid search applies a hard cosine-similarity gate before merging,
+    // so semantically unrelated memories (baking) are excluded entirely. The
+    // contract is "filter unrelated, return relevant" — assert both: programming
+    // memories must appear AND the baking memory must be filtered out.
     const result = await handleMemoryTool(db, 'memory_search', {
       query: 'automatic memory management in programming languages',
     });
     const text = getText(result);
 
-    // Both programming memories should appear before the baking one
     const pythonIdx = text.indexOf('Python Memory Management');
     const jvmIdx = text.indexOf('JVM Garbage Collection');
     const cakeIdx = text.indexOf('Baking Recipe');
 
-    assert.ok(pythonIdx !== -1 || jvmIdx !== -1, 'At least one programming memory should be found');
-
-    // If cake shows up, it should be ranked below the programming results
-    if (cakeIdx !== -1 && pythonIdx !== -1) {
-      assert.ok(pythonIdx < cakeIdx, 'Python memory should rank above baking');
-    }
-    if (cakeIdx !== -1 && jvmIdx !== -1) {
-      assert.ok(jvmIdx < cakeIdx, 'JVM memory should rank above baking');
-    }
+    assert.ok(pythonIdx !== -1, 'Python Memory Management must rank in');
+    assert.ok(jvmIdx !== -1, 'JVM Garbage Collection must rank in');
+    assert.equal(cakeIdx, -1, 'Baking Recipe (semantically unrelated) must be filtered out');
   });
 });
 
@@ -307,10 +303,15 @@ describe('E2E: Knowledge Graph Workflow', { timeout: 60_000 }, () => {
     assert.ok(graphText.includes('derived_from'));
     assert.ok(graphText.includes('(center)'));
 
-    // Graph at depth 1 from session should reach auth but NOT pattern (pattern→auth, not auth→pattern directly traversed at depth 1 from session)
+    // Graph at depth 1 from session should reach auth (one hop via depends_on)
+    // but must NOT reach Token Lifecycle Pattern (two hops: session→auth→pattern).
     const graph2 = await handleMemoryTool(db, 'memory_graph', { id: sessionId, depth: 1 });
     const graph2Text = getText(graph2);
-    assert.ok(graph2Text.includes('Auth System'));
+    assert.ok(graph2Text.includes('Auth System'), 'depth=1 must reach one-hop neighbour Auth System');
+    assert.ok(
+      !graph2Text.includes('Token Lifecycle Pattern'),
+      'depth=1 must NOT reach two-hop node Token Lifecycle Pattern',
+    );
 
     // Get memory shows relations
     const getAuth = await handleMemoryTool(db, 'memory_get', { id: authId });

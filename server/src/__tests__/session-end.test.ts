@@ -15,6 +15,7 @@ import {
   formatItemsWithCounts,
   SEMANTIC_SINGLETON_CAP,
   deduplicateTaskDescriptions,
+  deriveEpisodicTitle,
 } from '../cli/session-end.js';
 import { makeTempDb, cleanup } from './helpers.js';
 
@@ -49,6 +50,8 @@ describe('handleSessionEnd - unified episodic record', () => {
     assert.ok(main, 'Should have a session-end tagged memory');
     assert.ok(main.content.includes('Fix the login bug in the auth module'));
     assert.ok(main.content.includes('Bash'));
+    assert.ok(main.title, 'Should have a title set');
+    assert.ok(!main.title!.includes('**'), 'Title should not contain markdown bold markers');
 
     cleanup(db, dir);
   });
@@ -72,10 +75,9 @@ describe('handleSessionEnd - unified episodic record', () => {
     const memories = db.listMemories('episodic', 10, 0);
     const main = memories.find((m) => JSON.parse(m.tags).includes('session-end'));
     assert.ok(main, 'Should have a session-end tagged memory');
-    assert.ok(main.content.includes('**Task:**'), 'Should contain task');
-    assert.ok(main.content.includes('**Files modified:**'), 'Should contain files');
+    assert.ok(main.content.includes('Update the authentication module with new tests'), 'Should contain task prose');
     assert.ok(main.content.includes('auth.ts'), 'Should list modified file');
-    assert.ok(main.content.includes('**Errors:**'), 'Should contain errors');
+    assert.ok(main.content.includes('error'), 'Should mention errors');
 
     // No separate session-files or session-errors records
     const filesRecord = memories.find((m) => JSON.parse(m.tags).includes('session-files'));
@@ -106,9 +108,9 @@ describe('handleSessionEnd - unified episodic record', () => {
 
     const tags = JSON.parse(memories[0].tags) as string[];
     assert.ok(tags.includes('session-end'));
-    assert.ok(memories[0].content.includes('**Task:**'));
-    assert.ok(memories[0].content.includes('**Files modified:**'));
-    assert.ok(memories[0].content.includes('**Errors:**'));
+    assert.ok(memories[0].content.includes('Full session with everything including changes'));
+    assert.ok(memories[0].content.includes('index.ts'));
+    assert.ok(memories[0].content.includes('error'));
 
     cleanup(db, dir);
   });
@@ -131,8 +133,8 @@ describe('handleSessionEnd - unified episodic record', () => {
     const memories = db.listMemories('episodic', 10, 0);
     const main = memories.find((m) => JSON.parse(m.tags).includes('session-end'));
     assert.ok(main, 'Should have main episodic');
-    assert.ok(!main.content.includes('**Files modified:**'), 'Should not have files section');
-    assert.ok(!main.content.includes('**Errors:**'), 'Should not have errors section');
+    assert.ok(!main.content.includes('Touched'), 'Should not have files section');
+    assert.ok(!main.content.includes('error'), 'Should not have errors section');
 
     cleanup(db, dir);
   });
@@ -307,7 +309,7 @@ describe('handleSessionEnd - substance gating', () => {
     const memories = db.listMemories('episodic', 10, 0);
     const main = memories.find((m) => JSON.parse(m.tags).includes('session-end'));
     assert.ok(main, 'Should create episodic when substance is high despite short task');
-    assert.ok(main.content.includes('**Files modified:**'), 'Should contain merged files section');
+    assert.ok(main.content.includes('Touched'), 'Should contain merged files section');
 
     cleanup(db, dir);
   });
@@ -484,11 +486,13 @@ describe('handleSessionEnd - semantic tech-stack creates fallback record', () =>
     assert.ok(episodics.length >= 1);
 
     const semantics = db.listMemories('semantic', 10, 0);
-    // Tech-stack should be created via mergeOrCreateSemantic, not batch
-    if (semantics.length > 0) {
-      const techStack = semantics.find((m) => JSON.parse(m.tags).includes('tech-stack'));
-      assert.ok(techStack, 'Semantic should be tech-stack');
-    }
+    // Tech-stack should be created via mergeOrCreateSemantic, not batch.
+    // The companion test above proves a tech-stack record is produced for the
+    // same input — assert unconditionally here to catch a regression where the
+    // semantic batch silently produces zero records.
+    assert.ok(semantics.length >= 1, 'session-end must produce at least one semantic record');
+    const techStack = semantics.find((m) => JSON.parse(m.tags).includes('tech-stack'));
+    assert.ok(techStack, 'Semantic should be tech-stack');
 
     cleanup(db, dir);
   });
@@ -842,9 +846,6 @@ describe('handleSessionEnd - semantic singleton merge', () => {
     assert.equal(parsed.length, SEMANTIC_SINGLETON_CAP, `Should be capped at ${SEMANTIC_SINGLETON_CAP}`);
     // High-count item should survive
     assert.ok(techStack.content.includes('important(10)'), 'High-frequency item should be kept');
-    // Total is still capped: 15 existing + 1 new = 16, but capped to 15, so one tech(1) item was dropped
-    const totalItems = SEMANTIC_SINGLETON_CAP + 1; // 15 existing + 1 new (rust)
-    assert.ok(totalItems > SEMANTIC_SINGLETON_CAP, 'Test setup should exceed cap');
 
     cleanup(db, dir);
   });
@@ -913,6 +914,42 @@ describe('handleSessionEnd - semantic singleton merge', () => {
   });
 });
 
+describe('deriveEpisodicTitle', () => {
+  it('uses task summary when meaningful', () => {
+    assert.equal(deriveEpisodicTitle('Refactored transcript parser for clarity', []), 'Refactored transcript parser for clarity');
+  });
+
+  it('truncates long task summaries at word boundary', () => {
+    const long = 'Implemented interactive memory graph visualization dashboard with D3 force-directed layout and search filtering';
+    const result = deriveEpisodicTitle(long, []);
+    assert.ok(result.length <= 80);
+    assert.ok(!result.endsWith(' '));
+  });
+
+  it('falls back to files when task is too short', () => {
+    const result = deriveEpisodicTitle('Fix bug', ['server/src/index.ts', 'server/src/memory.ts']);
+    assert.match(result, /Session: 2 files in server\/src/);
+  });
+
+  it('falls back to files when task is an interruption marker', () => {
+    const result = deriveEpisodicTitle('[Request interrupted by user for tool use]', ['src/cli/session-end.ts']);
+    assert.match(result, /Session: 1 files in src\/cli/);
+  });
+
+  it('returns generic fallback when no task and no files', () => {
+    assert.equal(deriveEpisodicTitle('', []), 'Session activity');
+  });
+
+  it('limits directory list to 3', () => {
+    const files = ['a/x.ts', 'b/y.ts', 'c/z.ts', 'd/w.ts'];
+    const result = deriveEpisodicTitle('', files);
+    // Verify exactly the first 3 directory names appear, and the 4th is dropped.
+    const dirsInResult = ['a', 'b', 'c', 'd'].filter((d) => new RegExp(`\\b${d}\\b`).test(result));
+    assert.equal(dirsInResult.length, 3, `expected exactly 3 dir names in title, got ${dirsInResult.join(',')}`);
+    assert.ok(!dirsInResult.includes('d'), 'fourth dir must be dropped');
+  });
+});
+
 describe('deduplicateTaskDescriptions', () => {
   it('removes exact duplicates preserving first occurrence', () => {
     assert.deepEqual(deduplicateTaskDescriptions(['Fix auth bug', 'Fix auth bug', 'Add tests']), [
@@ -954,6 +991,7 @@ describe('computeSessionWeight', () => {
       memorySearches: 0,
       memoryStores: 0,
       bashCommands: [],
+      editToolUses: [],
       technologies: [],
     });
     assert.ok(weight < 1.0, `Expected low weight, got ${weight}`);
@@ -974,6 +1012,7 @@ describe('computeSessionWeight', () => {
         { command: 'npm run build', success: true, category: 'build' as const },
         { command: 'npm run lint', success: true, category: 'lint' as const },
       ],
+      editToolUses: [],
       technologies: ['typescript'],
     });
     assert.ok(weight >= 3.0, `Expected high weight, got ${weight}`);
@@ -990,6 +1029,7 @@ describe('computeSessionWeight', () => {
       memorySearches: 0,
       memoryStores: 0,
       bashCommands: [],
+      editToolUses: [],
       technologies: [],
     });
     // toolCallCount capped at 20 → 2.0, files capped at 10 → 3.0, errors capped at 5 → 0.5
@@ -1032,5 +1072,109 @@ describe('handleSessionEnd - noise tool filtering', () => {
     assert.ok(!main.content.includes('mcp__claude-memory'), 'Should exclude memory MCP tools');
 
     cleanup(db, dir);
+  });
+});
+
+describe('handleSessionEnd - prose episodic format', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+  });
+
+  it('session-end episodic content does not start with meta-prefix', async () => {
+    const transcriptPath = writeTranscript(dir, [
+      { role: 'user', content: 'Please refactor the transcript parser.' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', name: 'Edit', input: { file_path: 'src/cli/transcript.ts' } },
+        ],
+      },
+    ]);
+
+    await handleSessionEnd(db, { transcript_path: transcriptPath, cwd: dir });
+
+    const eps = db.listMemories('episodic', 10, 0);
+    assert.ok(eps.length >= 1);
+    for (const m of eps) {
+      assert.doesNotMatch(m.content, /^\s*\*\*(Task|Files|Tools):\*\*/, 'content must not start with meta-prefix');
+      assert.ok(m.title && m.title.length >= 10, 'title should be meaningful');
+    }
+
+    cleanup(db, dir);
+  });
+});
+
+describe('handleSessionEnd - turn-extractor integration', () => {
+  it('session-end writes a pattern when user correction signal present', async () => {
+    const { db, dir } = makeTempDb();
+    try {
+      const transcriptPath = writeTranscript(dir, [
+        { type: 'user', message: { role: 'user', content: 'Add maxLength to Zod schemas.' } },
+        {
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'tool_use', name: 'Edit', input: { file_path: 'server/src/memory.ts' } }],
+          },
+        },
+        {
+          type: 'user',
+          message: {
+            role: 'user',
+            content: "Don't use maxLength, user rejected that. Quality through writing, not limits.",
+          },
+        },
+        {
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Reverted maxLength additions.' }],
+          },
+        },
+      ]);
+      await handleSessionEnd(db, { cwd: dir, transcript_path: transcriptPath });
+
+      const patterns = db.listMemories('pattern', 20, 0);
+      const hasCorrection = patterns.some((p) => {
+        try {
+          const tags = JSON.parse(p.tags);
+          return tags.includes('correction');
+        } catch {
+          return false;
+        }
+      });
+      assert.ok(hasCorrection, 'must produce a pattern tagged "correction" from a clear user correction signal');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('session-end co-activation bumps pairs in the session cache without crashing', async () => {
+    const { db, dir } = makeTempDb();
+    try {
+      const { resetCache, markInjected } = await import('../cli/session-cache.js');
+      const now = new Date().toISOString();
+      db.insertMemory({
+        id: 'COACT_A', type: 'semantic', title: 'A', content: 'a', context: null, source: null,
+        tags: '[]', importance: 0.5, created_at: now, updated_at: now,
+        access_count: 0, last_accessed: null, injection_count: 0,
+      });
+      db.insertMemory({
+        id: 'COACT_B', type: 'semantic', title: 'B', content: 'b', context: null, source: null,
+        tags: '[]', importance: 0.5, created_at: now, updated_at: now,
+        access_count: 0, last_accessed: null, injection_count: 0,
+      });
+      resetCache(dir, '1');
+      markInjected(dir, ['COACT_A', 'COACT_B']);
+
+      await handleSessionEnd(db, { cwd: dir, transcript_path: writeTranscript(dir, []) });
+      // After one session-end, count should be >= 1
+      assert.ok(db.getCoActivationCount('COACT_A', 'COACT_B') >= 1);
+    } finally {
+      db.close();
+    }
   });
 });

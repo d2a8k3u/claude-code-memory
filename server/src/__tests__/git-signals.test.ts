@@ -58,10 +58,10 @@ describe('extractGitSignals', () => {
       assert.ok(Array.isArray(signals.files));
     });
 
-    it('satisfies GitSignals interface', () => {
-      const signals = extractGitSignals(process.cwd());
-      const _typeCheck: GitSignals = signals;
-      assert.ok(_typeCheck);
+    it('returns an object exposing exactly the GitSignals fields', () => {
+      const signals: GitSignals = extractGitSignals(process.cwd());
+      const expected = ['cwd', 'branch', 'commits', 'commitMessages', 'files'].sort();
+      assert.deepEqual(Object.keys(signals).sort(), expected);
     });
   });
 
@@ -135,7 +135,11 @@ describe('extractGitSignals', () => {
   describe('git repo signals', () => {
     it('extracts branch, commits, and files from current repo', () => {
       const signals = extractGitSignals(process.cwd());
-      assert.ok(signals.branch.length >= 0);
+      // The current process cwd is inside a git repo with commits — extraction
+      // must produce non-empty branch and commits. files may be empty if the
+      // working tree is clean, so we only enforce branch and commits here.
+      assert.ok(signals.branch.length > 0, 'branch must be extracted from a git repo');
+      assert.ok(signals.commits.length > 0, 'commits keywords must be extracted from a git repo');
       for (const field of ['cwd', 'branch', 'commits', 'files'] as const) {
         for (const term of signals[field]) {
           assert.equal(typeof term, 'string');

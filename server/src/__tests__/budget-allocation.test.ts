@@ -23,20 +23,46 @@ function makeSection(
 }
 
 describe('allocateBudget', () => {
-  it('respects per-section minimums', () => {
+  it('respects per-section minimums even when other sections have higher-quality candidates', () => {
+    // Flood `relevant` with many top-quality candidates that would, without
+    // minimum enforcement, claim the entire budget by quality. The low-quality
+    // singletons in episodic/pattern/procedural must still each get their min
+    // slot.
+    const flood = Array.from({ length: 30 }, (_, i) => makeCandidate(`r${i}`, 0.99 - i * 0.001));
+
     const sections = [
-      makeSection('relevant', [makeCandidate('r1', 0.9), makeCandidate('r2', 0.8)]),
-      makeSection('episodic', [makeCandidate('e1', 0.5)]),
-      makeSection('semantic', [makeCandidate('s1', 0.7), makeCandidate('s2', 0.6)]),
-      makeSection('pattern', [makeCandidate('p1', 0.4)]),
-      makeSection('procedural', [makeCandidate('pr1', 0.3)]),
+      makeSection('relevant', flood),
+      makeSection('episodic', [makeCandidate('e1', 0.05)]),
+      makeSection('semantic', [makeCandidate('s1', 0.05), makeCandidate('s2', 0.05)]),
+      makeSection('pattern', [makeCandidate('p1', 0.05)]),
+      makeSection('procedural', [makeCandidate('pr1', 0.05)]),
     ];
 
     const { allocated } = allocateBudget(sections);
 
-    assert.ok((allocated.get('episodic') ?? []).length >= 1, 'episodic should get at least min (1)');
-    assert.ok((allocated.get('pattern') ?? []).length >= 1, 'pattern should get at least min (1)');
-    assert.ok((allocated.get('procedural') ?? []).length >= 1, 'procedural should get at least min (1)');
+    assert.equal(
+      (allocated.get('episodic') ?? []).length,
+      1,
+      'episodic must get its 1-slot minimum despite very low quality',
+    );
+    assert.equal(
+      (allocated.get('pattern') ?? []).length,
+      1,
+      'pattern must get its 1-slot minimum despite very low quality',
+    );
+    assert.equal(
+      (allocated.get('procedural') ?? []).length,
+      1,
+      'procedural must get its 1-slot minimum despite very low quality',
+    );
+    assert.ok(
+      (allocated.get('semantic') ?? []).length >= CONTEXT_BUDGET.semantic.min,
+      `semantic must meet its min (${CONTEXT_BUDGET.semantic.min}) despite low quality`,
+    );
+    assert.ok(
+      (allocated.get('relevant') ?? []).length >= CONTEXT_BUDGET.relevant.min,
+      `relevant must meet its min (${CONTEXT_BUDGET.relevant.min})`,
+    );
   });
 
   it('distributes overflow to highest-quality candidates', () => {

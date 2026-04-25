@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryDatabase, recencyScore, contentLengthPenalty } from '../database.js';
 import { THRESHOLDS } from '../thresholds.js';
@@ -233,7 +233,13 @@ describe('MemoryDatabase - injection tracking', () => {
 
   it('handles empty ID array gracefully', () => {
     const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'untouched' }));
+
     db.incrementInjectionCount([]);
+
+    const row = db.getMemoryByIdRaw('untouched');
+    assert.ok(row);
+    assert.equal(row.injection_count, 0, 'empty ID array must not touch any row');
     cleanup(db, dir);
   });
 });
@@ -571,10 +577,10 @@ describe('MemoryDatabase - vector search', () => {
     assert.equal(dup.id, 'm1');
     assert.ok(dup.distance < 0.01);
 
+    // Dissimilar embedding (different seed) — distance must exceed EXACT_DUPLICATE
+    // threshold (0.05), so findSimilarMemory must return null per its contract.
     const diff = db.findSimilarMemory(makeEmbedding(999));
-    if (diff) {
-      assert.ok(diff.distance >= 0.05);
-    }
+    assert.equal(diff, null, 'dissimilar embedding must not match (returns null when distance >= threshold)');
     cleanup(db, dir);
   });
 
@@ -803,20 +809,28 @@ describe('MemoryDatabase - relevance filtering', () => {
   it('search does not modify importance of any results', () => {
     const { db, dir } = makeTempDb();
 
+    // Memory whose content matches the search query — guaranteed to be returned by FTS.
     db.insertMemory(
       makeMemoryRow({
-        id: 'noise',
-        content: 'unrelated cooking recipe pasta sauce',
+        id: 'matching',
+        content: 'machine learning models and training pipelines',
         importance: 0.5,
       }),
     );
-    db.updateMemoryEmbedding('noise', makeEmbedding(999));
+    db.updateMemoryEmbedding('matching', makeEmbedding(1));
 
-    db.hybridSearchMemories('machine learning', makeEmbedding(1), 10, { topicThreshold: 0.05 });
+    const results = db.hybridSearchMemories('machine learning', makeEmbedding(1), 10, {
+      topicThreshold: 0.05,
+    });
+    // Must actually appear in results, otherwise we are not testing the right thing.
+    assert.ok(
+      results.some((r) => r.id === 'matching'),
+      'matching memory must appear in search results',
+    );
 
-    const row = db.getMemoryByIdRaw('noise');
+    const row = db.getMemoryByIdRaw('matching');
     assert.ok(row);
-    assert.equal(row.importance, 0.5, 'Importance should not change after search');
+    assert.equal(row.importance, 0.5, 'Importance of returned result must not change after search');
     cleanup(db, dir);
   });
 
@@ -1833,11 +1847,19 @@ describe('MemoryDatabase - getCurationStats', () => {
 // WAL checkpoint on close
 // ==========================================================
 describe('MemoryDatabase - WAL checkpoint', () => {
-  it('close() executes WAL checkpoint without error', () => {
+  it('close() persists data and re-opens cleanly', () => {
     const { db, dir } = makeTempDb();
     db.insertMemory(makeMemoryRow({ id: 'mem1', content: 'test data' }));
-    // close() should run wal_checkpoint(TRUNCATE) then close — no throw
+    const dbPath = db.path;
+
     db.close();
+
+    // Re-open and verify data was flushed (WAL checkpoint required for durability).
+    const db2 = new MemoryDatabase(dbPath);
+    const row = db2.getMemoryByIdRaw('mem1');
+    assert.ok(row, 'memory must persist across close/open');
+    assert.equal(row.content, 'test data');
+    db2.close();
     rmSync(dir, { recursive: true });
   });
 });
@@ -1853,4 +1875,83 @@ describe('MemoryDatabase - path getter', () => {
     assert.ok(statSync(dbPath).isFile());
     cleanup(db, dir);
   });
+});
+
+// ==========================================================
+// relation_coactivations
+// ==========================================================
+
+function insertSimpleMemory(db: MemoryDatabase, label: string): string {
+  const id = `TEST_${label}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const now = new Date().toISOString();
+  db.insertMemory({
+    id,
+    type: 'episodic',
+    title: label,
+    content: label,
+    context: null,
+    source: null,
+    tags: '[]',
+    importance: 0.5,
+    created_at: now,
+    updated_at: now,
+    access_count: 0,
+    last_accessed: null,
+    injection_count: 0,
+  });
+  return id;
+}
+
+test('relation_coactivations table: incrementCoActivation bumps and returns count', () => {
+  const { db, dir } = makeTempDb();
+  try {
+    const m1 = insertSimpleMemory(db, 'a');
+    const m2 = insertSimpleMemory(db, 'b');
+    assert.equal(db.incrementCoActivation(m1, m2), 1);
+    assert.equal(db.incrementCoActivation(m1, m2), 2);
+    assert.equal(db.incrementCoActivation(m1, m2), 3);
+    assert.equal(db.getCoActivationCount(m1, m2), 3);
+  } finally {
+    cleanup(db, dir);
+  }
+});
+
+test('resetCoActivation deletes the counter row', () => {
+  const { db, dir } = makeTempDb();
+  try {
+    const m1 = insertSimpleMemory(db, 'a');
+    const m2 = insertSimpleMemory(db, 'b');
+    db.incrementCoActivation(m1, m2);
+    db.resetCoActivation(m1, m2);
+    assert.equal(db.getCoActivationCount(m1, m2), 0);
+  } finally {
+    cleanup(db, dir);
+  }
+});
+
+test('co-activation cascade: memory delete removes coactivation rows', () => {
+  const { db, dir } = makeTempDb();
+  try {
+    const m1 = insertSimpleMemory(db, 'a');
+    const m2 = insertSimpleMemory(db, 'b');
+    db.incrementCoActivation(m1, m2);
+    db.deleteMemory(m1);
+    assert.equal(db.getCoActivationCount(m1, m2), 0);
+  } finally {
+    cleanup(db, dir);
+  }
+});
+
+test('co-activation normalises pair order (a,b == b,a)', () => {
+  const { db, dir } = makeTempDb();
+  try {
+    const m1 = insertSimpleMemory(db, 'a');
+    const m2 = insertSimpleMemory(db, 'b');
+    db.incrementCoActivation(m1, m2);
+    db.incrementCoActivation(m2, m1);
+    assert.equal(db.getCoActivationCount(m1, m2), 2);
+    assert.equal(db.getCoActivationCount(m2, m1), 2);
+  } finally {
+    cleanup(db, dir);
+  }
 });

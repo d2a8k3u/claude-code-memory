@@ -208,25 +208,27 @@ describe('Integration: Semantic Ranking', { timeout: 120_000 }, () => {
       });
     });
 
-    const result = await timed('semantic search', () =>
-      handleMemoryTool(db, 'memory_search', {
-        query: 'generic types and type safety in programming',
+    // hybridSearchMemories applies a hard cosine-similarity gate (> 0.2) before
+    // merging vector hits. Unrelated memories (cookies vs. type theory) never
+    // make it into results; the relevance contract is "filter unrelated, rank
+    // remaining". We assert both: cookie is excluded AND both programming
+    // memories are included.
+    const queryEmb = await generateEmbedding('generic types and type safety in programming');
+    assert.ok(queryEmb, 'embedding model required for this integration test');
+    const results = await timed('semantic search (raw)', async () =>
+      db.hybridSearchMemories('generic types and type safety in programming', queryEmb, 10, {
+        topicThreshold: 0,
+        relevanceThreshold: 0,
       }),
     );
-    const text = getText(result);
 
-    const tsIdx = text.indexOf('TypeScript Generics');
-    const rustIdx = text.indexOf('Rust Type System');
-    const cookieIdx = text.indexOf('Cookie Recipe');
-
-    assert.ok(tsIdx !== -1 || rustIdx !== -1, 'At least one programming memory found');
-
-    if (cookieIdx !== -1 && tsIdx !== -1) {
-      assert.ok(tsIdx < cookieIdx, 'Programming results should rank above cookies');
-    }
-    if (cookieIdx !== -1 && rustIdx !== -1) {
-      assert.ok(rustIdx < cookieIdx, 'Programming results should rank above cookies');
-    }
+    const titles = results.map((r) => r.title);
+    assert.ok(titles.includes('TypeScript Generics'), 'TypeScript Generics must rank in');
+    assert.ok(titles.includes('Rust Type System'), 'Rust Type System must rank in');
+    assert.ok(
+      !titles.includes('Cookie Recipe'),
+      'Cookie Recipe (semantically unrelated) must be filtered out — production contract',
+    );
   });
 });
 
@@ -500,13 +502,18 @@ describe('Integration: All Memory Types', { timeout: 120_000 }, () => {
       assert.ok(getText(filtered).includes(`type: ${type}`));
     }
 
-    // Pattern should default to 0.8
-    const patternList = await handleMemoryTool(db, 'memory_list', { type: 'pattern' });
-    assert.ok(getText(patternList).includes('0.8'));
+    // Pattern should default to 0.8 — verify on the raw row, not via substring
+    // match (substrings like "0.8"/"0.5" appear in many other formatted fields).
+    const patterns = db.listMemories('pattern', 10, 0);
+    assert.equal(patterns.length, 1);
+    assert.equal(patterns[0].importance, 0.8, 'pattern must default to importance 0.8');
 
-    // Non-pattern should default to 0.5
-    const semanticList = await handleMemoryTool(db, 'memory_list', { type: 'semantic' });
-    assert.ok(getText(semanticList).includes('0.5'));
+    // Non-pattern types should default to 0.5
+    for (const t of ['episodic', 'semantic', 'procedural', 'working'] as const) {
+      const rows = db.listMemories(t, 10, 0);
+      assert.equal(rows.length, 1, `expected exactly one ${t} row`);
+      assert.equal(rows[0].importance, 0.5, `${t} must default to importance 0.5`);
+    }
   });
 });
 
