@@ -103,7 +103,7 @@ export function derivePatternTitle(texts: string[]): string {
   for (const text of texts) {
     const words = text
       .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, ' ')
+      .replace(/[\p{P}\p{S}]/gu, ' ')
       .split(/\s+/)
       .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
 

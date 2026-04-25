@@ -8,6 +8,11 @@ export interface BashCommand {
   category: BashCategory;
 }
 
+export interface EditToolUse {
+  name: 'Edit' | 'Write' | 'NotebookEdit';
+  file_path: string;
+}
+
 export interface TranscriptSummary {
   taskSummary: string;
   toolsUsed: string[];
@@ -18,6 +23,8 @@ export interface TranscriptSummary {
   memorySearches: number;
   memoryStores: number;
   bashCommands: BashCommand[];
+  /** Edit/Write/NotebookEdit calls in transcript order, used by turn-extractor. */
+  editToolUses: EditToolUse[];
   technologies: string[];
 }
 
@@ -66,12 +73,14 @@ const TECH_FROM_EXTENSIONS: Record<string, string> = {
   '.svelte': 'svelte',
 };
 
-function categorizeCommand(command: string): BashCategory {
+export function categorizeCommand(command: string): BashCategory {
   for (const [category, pattern] of CATEGORY_PATTERNS) {
     if (pattern.test(command)) return category;
   }
   return 'other';
 }
+
+export { categorizeCommand as classifyCommand };
 
 function detectTechFromCommand(command: string): string[] {
   const techs: string[] = [];
@@ -97,6 +106,7 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
     memorySearches: 0,
     memoryStores: 0,
     bashCommands: [],
+    editToolUses: [],
     technologies: [],
   };
 
@@ -162,8 +172,9 @@ export function parseTranscript(transcriptPath: string, cwd: string): Transcript
           }
 
           const inp = block.input ?? {};
-          if ((name === 'Edit' || name === 'Write') && typeof inp.file_path === 'string') {
+          if ((name === 'Edit' || name === 'Write' || name === 'NotebookEdit') && typeof inp.file_path === 'string') {
             filesModified.add(inp.file_path);
+            result.editToolUses.push({ name, file_path: inp.file_path });
             const tech = detectTechFromFile(inp.file_path);
             if (tech) technologies.add(tech);
           }

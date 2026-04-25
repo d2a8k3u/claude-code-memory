@@ -24,6 +24,8 @@ export const THRESHOLDS = {
   CLUSTER_QUALITY_STRONG: 0.65,
   /** Existing pattern coverage check — skip if centroid is this similar to an existing pattern (tightened from 0.50) */
   PATTERN_OVERLAP: 0.55,
+  /** Minimum average Jaccard word overlap between cluster tasks — rejects format-only clusters */
+  CLUSTER_TOPIC_OVERLAP_MIN: 0.15,
 
   // --- Recency scoring (two-phase decay) ---
   /** Days in the steep short-term decay phase */
@@ -70,3 +72,105 @@ export type ScoringWeights = {
   readonly recency: number;
   readonly access: number;
 };
+
+// --- Per-type relevance thresholds for hook-triggered searches ---
+export const TYPE_RELEVANCE = {
+  semantic: 0.25,
+  pattern: 0.4,
+  procedural: 0.4,
+  episodic: 0.25,
+} as const;
+
+// --- Per-hook caps by memory type ---
+export const TYPE_LIMITS_PER_HOOK = {
+  userPromptSubmit: {
+    semantic: 3,
+    pattern: 2,
+    episodic: 2,
+    total: 6,
+  },
+  preToolUse: {
+    semantic: 3,
+    pattern: 2,
+    procedural: 1,
+    episodic: 2,
+    total: 3,
+  },
+  sessionStart: {
+    semantic: 3,
+    pattern: 2,
+    episodic: 3,
+    total: 10,
+  },
+} as const;
+
+// --- Per-type decay and age-out rules ---
+export const TYPE_DECAY = {
+  episodic: { perSession: 0.08, ageOutDays: 90, staleImpThreshold: 0.05 },
+  semantic: { perSession: 0.02, ageOutDays: Infinity, staleImpThreshold: 0 },
+  procedural: { perSession: 0.02, ageOutDays: Infinity, staleImpThreshold: 0 },
+  pattern: { perSession: 0.01, ageOutDays: 180, staleImpThreshold: 0.05 },
+} as const;
+
+// --- Importance boosts per type ---
+export const TYPE_BOOST_ON_INJECT = {
+  episodic: 0.02,
+  semantic: 0.01,
+  procedural: 0.01,
+  pattern: 0.04,
+} as const;
+
+export const TYPE_BOOST_ON_ACCESS = {
+  episodic: 0.05,
+  semantic: 0.03,
+  procedural: 0.03,
+  pattern: 0.08,
+} as const;
+
+// --- Relation weight evolution ---
+export const RELATION_WEIGHT = {
+  strongThreshold: 0.5,
+  floor: 0.05,
+  decayPerSession: 0.005,
+  boostOnCoInject: 0.05,
+  boostOnCoAccess: 0.1,
+  coActivationPromotionCount: 3,
+  sweepCadenceSessions: 20,
+  sweepBatchSize: 100,
+  sweepTimeBudgetMs: 500,
+} as const;
+
+// --- Relation sweep limits ---
+export const RELATION_SWEEP = {
+  cadenceSessions: 20,
+  batchSize: 100,
+  timeBudgetMs: 500,
+  neighborCandidates: 20,
+} as const;
+
+export type RelationRuleInput =
+  | { cosineDistance: number }
+  | { similarity: number }
+  | { sharedTagCount: number }
+  | Record<string, never>;
+
+export function computeInitialRelationWeight(
+  rule: 'contradicts' | 'extends' | 'relates_to' | 'derived_from' | 'co_activation',
+  input: RelationRuleInput,
+): number {
+  switch (rule) {
+    case 'contradicts':
+      return Math.max(0, 1 - (input as { cosineDistance: number }).cosineDistance);
+    case 'extends':
+      return (input as { similarity: number }).similarity;
+    case 'relates_to':
+      return Math.min(0.8, 0.3 + 0.1 * (input as { sharedTagCount: number }).sharedTagCount);
+    case 'derived_from':
+      return 0.5;
+    case 'co_activation':
+      return 0.45;
+    default: {
+      return rule;
+    }
+  }
+}

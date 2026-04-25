@@ -14,6 +14,18 @@ export function extractTaskFromEpisodic(content: string): string {
   return taskMatch ? taskMatch[1].trim() : content.slice(0, 100);
 }
 
+/**
+ * Strip structural boilerplate from episodic content to get the semantic core.
+ * Used to compute "topic similarity" separate from "format similarity".
+ */
+export function stripEpisodicBoilerplate(content: string): string {
+  return content
+    .replace(/\*\*(?:Tools|Memory ops|Errors|Files modified):\*\*[^\n]*/g, '')
+    .replace(/\*\*Task:\*\*\s*/g, '')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
 export function deduplicateTaskDescriptions(tasks: string[]): string[] {
   const seen = new Set<string>();
   const unique: string[] = [];
@@ -25,6 +37,47 @@ export function deduplicateTaskDescriptions(tasks: string[]): string[] {
     }
   }
   return unique;
+}
+
+/**
+ * Compute average pairwise word overlap (Jaccard similarity) across task descriptions.
+ * Low overlap means the cluster members are topically unrelated — likely grouped
+ * only because of shared episodic formatting structure.
+ */
+export function computeTopicOverlap(tasks: string[]): number {
+  if (tasks.length < 2) return 0;
+
+  const tokenize = (text: string): Set<string> => {
+    return new Set(
+      text
+        .toLowerCase()
+        .replace(/[\p{P}\p{S}]/gu, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length > 2),
+    );
+  };
+
+  const tokenSets = tasks.map(tokenize);
+  let pairSum = 0;
+  let pairCount = 0;
+
+  for (let i = 0; i < tokenSets.length; i++) {
+    for (let j = i + 1; j < tokenSets.length; j++) {
+      const a = tokenSets[i];
+      const b = tokenSets[j];
+      let intersection = 0;
+      for (const word of a) {
+        if (b.has(word)) intersection++;
+      }
+      const union = a.size + b.size - intersection;
+      if (union > 0) {
+        pairSum += intersection / union;
+        pairCount++;
+      }
+    }
+  }
+
+  return pairCount > 0 ? pairSum / pairCount : 0;
 }
 
 /**
@@ -88,6 +141,15 @@ export async function detectAndStorePatterns(db: MemoryDatabase): Promise<number
     const avgSimilarity = pairCount > 0 ? pairSum / pairCount : 0;
     if (avgSimilarity < THRESHOLDS.CLUSTER_QUALITY_MIN) continue;
 
+    // Topic diversity check: verify the cluster has actual topical coherence,
+    // not just structural similarity from shared episodic formatting.
+    const taskDescriptions = cluster
+      .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
+      .filter((t) => t.length > 0);
+    const uniqueTasks = deduplicateTaskDescriptions(taskDescriptions);
+    const topicOverlap = computeTopicOverlap(uniqueTasks);
+    if (topicOverlap < THRESHOLDS.CLUSTER_TOPIC_OVERLAP_MIN) continue;
+
     const dim = 384;
     const centroid = new Float32Array(dim);
     for (const emb of clusterEmbs) {
@@ -109,11 +171,7 @@ export async function detectAndStorePatterns(db: MemoryDatabase): Promise<number
     }
     if (covered) continue;
 
-    const taskDescriptions = cluster
-      .map((idx) => extractTaskFromEpisodic(clusterCandidates[idx].content))
-      .filter((t) => t.length > 0);
     const title = derivePatternTitle(taskDescriptions);
-    const uniqueTasks = deduplicateTaskDescriptions(taskDescriptions);
     const content = `Recurring theme across ${cluster.length} sessions.\n\n**Representative tasks:**\n${uniqueTasks.map((t) => `- ${t}`).join('\n')}`;
 
     patternTexts.push(`${title}: ${content}`);

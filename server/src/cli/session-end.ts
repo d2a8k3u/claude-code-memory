@@ -1,13 +1,14 @@
+import { readFileSync } from 'node:fs';
 import type { MemoryDatabase } from '../database.js';
-import type { MemoryRow, MemoryType } from '../types.js';
+import type { MemoryRow } from '../types.js';
 import { generateEmbedding, generateEmbeddings, embeddingToBuffer } from '../embeddings.js';
 import type { HookInput, HookOutput } from './types.js';
 import { parseTranscript, type BashCategory, type TranscriptSummary } from './transcript.js';
 import { makeMemoryRecord } from './shared.js';
-import { safeParseTags } from '../merge-utils.js';
-import { THRESHOLDS } from '../thresholds.js';
-import { splitByTopics, insertSplitSections } from '../topic-splitter.js';
+import { insertWithAutoRelations } from '../memory.js';
 import { detectAndStorePatterns } from './pattern-detector.js';
+import { extractAll } from './turn-extractor.js';
+import { dedupSet } from './session-cache.js';
 
 export { deduplicateTaskDescriptions, extractTaskFromEpisodic } from './pattern-detector.js';
 
@@ -86,25 +87,61 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
   const cwd = input.cwd ?? process.cwd();
   const summary = parseTranscript(input.transcript_path ?? '', cwd);
 
+  // Co-activation bumps for all pairs of IDs injected this session (always runs)
+  try {
+    const cache = [...dedupSet(cwd)];
+    for (let i = 0; i < cache.length; i++) {
+      for (let j = i + 1; j < cache.length; j++) {
+        const count = db.incrementCoActivation(cache[i], cache[j]);
+        db.boostRelationOnCoInject(cache[i], cache[j]);
+        if (count >= 3) {
+          try {
+            db.addRelation(cache[i], cache[j], 'relates_to', 0.45);
+          } catch {
+            // already exists
+          }
+          db.resetCoActivation(cache[i], cache[j]);
+        }
+      }
+    }
+  } catch {
+    // swallow
+  }
+
   const episodicRecords: (MemoryRow & { embedding?: Buffer | null })[] = [];
   const embeddingTexts: string[] = [];
 
-  // Build unified episodic record (files + errors merged into main)
-  const mainParts: string[] = [];
+  // Build unified episodic record as prose (no meta-prefixes)
   const taskSummary = summary.taskSummary ?? '';
-  if (taskSummary) mainParts.push(`**Task:** ${taskSummary}`);
-  if (summary.toolsUsed.length > 0) mainParts.push(`**Tools:** ${summary.toolsUsed.join(', ')}`);
-  if (summary.memorySearches > 0 || summary.memoryStores > 0) {
-    mainParts.push(`**Memory ops:** ${summary.memorySearches} searches, ${summary.memoryStores} stores`);
-  }
-  if (summary.filesModified.length > 0) {
-    mainParts.push(`**Files modified:** ${summary.filesModified.join(', ')}`);
-  }
-  if (summary.errorCount > 0) {
-    mainParts.push(`**Errors:** ${summary.errorCount} errors during session`);
+  const contentParts: string[] = [];
+
+  if (taskSummary) {
+    contentParts.push(taskSummary);
   }
 
-  if (mainParts.length === 0) {
+  const factParts: string[] = [];
+  if (summary.toolsUsed.length > 0) {
+    factParts.push(`Used tools: ${summary.toolsUsed.join(', ')}`);
+  }
+  if (summary.filesModified.length > 0) {
+    const fileList = summary.filesModified.slice(0, 8).join(', ');
+    const more = summary.filesModified.length > 8 ? ` (+${summary.filesModified.length - 8} more)` : '';
+    factParts.push(
+      `Touched ${summary.filesModified.length} file${summary.filesModified.length === 1 ? '' : 's'}: ${fileList}${more}`,
+    );
+  }
+  if (summary.memorySearches > 0 || summary.memoryStores > 0) {
+    factParts.push(`Memory ops: ${summary.memorySearches} searches, ${summary.memoryStores} stores`);
+  }
+  if (summary.errorCount > 0) {
+    factParts.push(`${summary.errorCount} error${summary.errorCount === 1 ? '' : 's'} encountered`);
+  }
+
+  if (factParts.length > 0) {
+    contentParts.push(factParts.join('. ') + '.');
+  }
+
+  if (contentParts.length === 0) {
     return { ok: true };
   }
 
@@ -115,9 +152,15 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
   const isTrivial = summary.toolCallCount < 3 && summary.filesModified.length === 0;
 
   if (!isInterrupted && !(isShortTask && (!hasSubstance || isTrivial))) {
-    const mainContent = mainParts.join('\n');
-    episodicRecords.push(makeMemoryRecord('episodic', mainContent, ['auto-save', 'session-end']));
-    embeddingTexts.push(mainContent);
+    const mainContent = contentParts.join(' ');
+    const episodicTitle = deriveEpisodicTitle(taskSummary, summary.filesModified);
+    episodicRecords.push(
+      makeMemoryRecord('episodic', mainContent, ['auto-save', 'session-end'], {
+        title: episodicTitle,
+        context: 'session-end auto-save',
+      }),
+    );
+    embeddingTexts.push(`${episodicTitle}\n\n${mainContent}`);
   }
 
   // Handle singleton records by tag-based lookup (one per category, updated in place)
@@ -163,23 +206,42 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
 
   for (let i = 0; i < allRecords.length; i++) {
     const record = allRecords[i];
-    const emb = embeddings[i];
+    await insertWithAutoRelations(db, record, { strictContent: true });
+  }
 
-    if (emb) {
-      const similar = db.findSimilarMemory(emb, THRESHOLDS.EPISODIC_DEDUP, record.type as MemoryType);
-      if (similar) continue;
+  // Extractor pass: extra insights beyond the closing episodic
+  try {
+    const ctx = {
+      userMessage: extractLastUserMessage(input.transcript_path ?? ''),
+      assistantReply: extractLastAssistantMessage(input.transcript_path ?? ''),
+      toolCalls: [
+        ...summary.bashCommands.map((c) => ({
+          name: 'Bash',
+          input: { command: c.command } as Record<string, unknown>,
+          output: c.success ? 'ok' : 'error',
+        })),
+        ...summary.editToolUses.map((e) => ({
+          name: e.name,
+          input: { file_path: e.file_path } as Record<string, unknown>,
+          output: 'ok',
+        })),
+      ],
+      filesRead: summary.filesRead ?? [],
+      filesWritten: summary.filesModified,
+      errorCount: summary.errorCount,
+      sessionId: String(parseInt(db.getSessionMeta('session_count') ?? '0', 10)),
+      turnIndex: 0,
+    };
+    const extras = await extractAll(ctx, db);
+    for (const rec of extras) {
+      try {
+        await insertWithAutoRelations(db, rec, { strictContent: true, generateEmbeddingIfMissing: true });
+      } catch {
+        // skip this insight
+      }
     }
-
-    const splitResult = splitByTopics(record.content);
-    if (splitResult.shouldSplit && splitResult.sections) {
-      await insertSplitSections(db, splitResult.sections, {
-        type: record.type as MemoryType,
-        context: record.context ?? undefined,
-        tags: safeParseTags(record.tags),
-      });
-    } else {
-      db.insertMemory(record);
-    }
+  } catch {
+    // swallow
   }
 
   await detectAndStorePatterns(db);
@@ -306,6 +368,32 @@ function categoryLabel(category: BashCategory): string {
   return labels[category];
 }
 
+export function deriveEpisodicTitle(taskSummary: string, filesModified: string[]): string {
+  // Use the task summary if it's meaningful (not an interruption marker or too short)
+  if (taskSummary && taskSummary.length >= 10 && !taskSummary.startsWith('[Request interrupted')) {
+    // Take first ~80 chars, break at word boundary
+    const truncated = taskSummary.length <= 80 ? taskSummary : taskSummary.slice(0, 80).replace(/\s+\S*$/, '');
+    return truncated;
+  }
+
+  // Fall back to deriving from modified files
+  if (filesModified.length > 0) {
+    const dirs = new Set<string>();
+    for (const f of filesModified) {
+      const parts = f.split('/');
+      if (parts.length >= 2) {
+        dirs.add(parts.slice(0, Math.min(2, parts.length - 1)).join('/'));
+      } else {
+        dirs.add(parts[0]);
+      }
+    }
+    const dirList = [...dirs].slice(0, 3).join(', ');
+    return `Session: ${filesModified.length} files in ${dirList}`;
+  }
+
+  return 'Session activity';
+}
+
 function extractActiveModules(filesModified: string[]): string[] {
   const dirCounts = new Map<string, number>();
   for (const f of filesModified) {
@@ -320,5 +408,53 @@ function extractActiveModules(filesModified: string[]): string[] {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
     .map(([dir]) => dir);
+}
+
+function extractLastUserMessage(transcriptPath: string): string {
+  if (!transcriptPath) return '';
+  try {
+    const raw = readFileSync(transcriptPath, 'utf-8');
+    const lines = raw.split('\n').filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.type === 'user' && typeof entry.message?.content === 'string') {
+          return entry.message.content as string;
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+function extractLastAssistantMessage(transcriptPath: string): string {
+  if (!transcriptPath) return '';
+  try {
+    const raw = readFileSync(transcriptPath, 'utf-8');
+    const lines = raw.split('\n').filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.type === 'assistant') {
+          const parts = entry.message?.content ?? [];
+          if (Array.isArray(parts)) {
+            return parts
+              .filter((p: { type: string }) => p.type === 'text')
+              .map((p: { text: string }) => p.text)
+              .join('\n');
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return '';
 }
 

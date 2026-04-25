@@ -51,9 +51,26 @@ async function main() {
         }
         break;
       }
+      case 'prompt-submit': {
+        const { handlePromptSubmit } = await import('./cli/prompt-submit.js');
+        const result = await handlePromptSubmit(db, input);
+        writeHookOutput(result);
+        break;
+      }
+      case 'pre-tool-use': {
+        const { handlePreToolUse } = await import('./cli/pre-tool-use.js');
+        const result = await handlePreToolUse(db, input);
+        writeHookOutput(result);
+        break;
+      }
       case 'reorganize': {
         const result = await handleReorganize(db, input);
         writeHookOutput(result);
+        break;
+      }
+      case 'cleanup': {
+        const { handleCleanup } = await import('./cli/cleanup.js');
+        await handleCleanup(db, process.argv.slice(3));
         break;
       }
       default:
