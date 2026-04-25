@@ -1,10 +1,10 @@
 {
   "name": "claude-memory-server",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean",
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean && cp src/graph.html dist/graph.html",
     "dev": "tsup src/index.ts src/cli.ts --format esm --watch",
     "test": "node --import tsx --test src/__tests__/*.test.ts",
     "lint": "eslint src/",
