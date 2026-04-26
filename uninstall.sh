@@ -100,12 +100,16 @@ if [ -f "$SETTINGS_FILE" ]; then
   "
 fi
 
-# Remove memory section from CLAUDE.md
+# Remove memory references from CLAUDE.md and delete CLAUDE_MEMORY.md
 echo "Cleaning up CLAUDE.md..."
-CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+CLAUDE_DIR="$HOME/.claude"
+CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
+MEMORY_MD="$CLAUDE_DIR/CLAUDE_MEMORY.md"
 MARKER_START="<!-- claude-memory:start -->"
 MARKER_END="<!-- claude-memory:end -->"
+REF_LINE="@CLAUDE_MEMORY.md"
 
+# Strip legacy inline memory section (pre-CLAUDE_MEMORY.md installs)
 if [ -f "$CLAUDE_MD" ] && grep -q "$MARKER_START" "$CLAUDE_MD"; then
   TMPFILE="$(mktemp)"
   awk -v start="$MARKER_START" -v end="$MARKER_END" '
@@ -114,7 +118,21 @@ if [ -f "$CLAUDE_MD" ] && grep -q "$MARKER_START" "$CLAUDE_MD"; then
     !skip { print }
   ' "$CLAUDE_MD" > "$TMPFILE"
   mv "$TMPFILE" "$CLAUDE_MD"
-  echo "  Removed memory section from CLAUDE.md"
+  echo "  Removed legacy inline memory section from CLAUDE.md"
+fi
+
+# Remove the @CLAUDE_MEMORY.md reference line
+if [ -f "$CLAUDE_MD" ] && grep -qxF "$REF_LINE" "$CLAUDE_MD"; then
+  TMPFILE="$(mktemp)"
+  grep -vxF "$REF_LINE" "$CLAUDE_MD" > "$TMPFILE" || true
+  mv "$TMPFILE" "$CLAUDE_MD"
+  echo "  Removed @CLAUDE_MEMORY.md reference from CLAUDE.md"
+fi
+
+# Delete the dedicated memory rules file
+if [ -f "$MEMORY_MD" ]; then
+  rm -f "$MEMORY_MD"
+  echo "  Removed $MEMORY_MD"
 fi
 
 echo ""

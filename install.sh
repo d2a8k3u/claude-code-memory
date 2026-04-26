@@ -250,34 +250,52 @@ fs.mkdirSync(require('path').dirname(path), { recursive: true });
 fs.writeFileSync(path, JSON.stringify(settings, null, 2) + '\n');
 "
 
-# Add memory instructions to CLAUDE.md
+# Write CLAUDE_MEMORY.md and reference it from CLAUDE.md
 echo "Configuring CLAUDE.md..."
-CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+CLAUDE_DIR="$HOME/.claude"
+CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
+MEMORY_MD="$CLAUDE_DIR/CLAUDE_MEMORY.md"
 MARKER_START="<!-- claude-memory:start -->"
 MARKER_END="<!-- claude-memory:end -->"
+REF_LINE="@CLAUDE_MEMORY.md"
 
-MEMORY_SECTION="$MARKER_START
-## Memory System
+mkdir -p "$CLAUDE_DIR"
 
-Your project memory is managed by the claude-memory plugin. The plugin's hooks search memory automatically on every user prompt, before risky edits, before running commands, and when it detects recall-style questions. **You do not need to call \`memory_search\` for routine recall** — the relevant memories arrive as context.
+# Write the memory rules to a dedicated file (entire file is plugin-owned)
+cat > "$MEMORY_MD" <<'MEMORY_EOF'
+# Memory System
+
+Your project memory is managed by the claude-memory plugin. The plugin's hooks search memory automatically on every user prompt, before risky edits, before running commands, and when it detects recall-style questions. **You do not need to call `memory_search` for routine recall** — the relevant memories arrive as context.
 
 **When you still call the MCP tools directly:**
 
-- \`memory_store\` — when the user explicitly says \"remember this\", when you disagree with an auto-saved memory, or when you want to save a judgement-level insight (e.g., a project convention you inferred).
-- \`memory_search\` — when you need to look up something specific the hooks did not surface.
-- \`memory_relate\`, \`memory_update\`, \`memory_delete\` — for curating the graph.
+- `memory_store` — when the user explicitly says "remember this", when you disagree with an auto-saved memory, or when you want to save a judgement-level insight (e.g., a project convention you inferred).
+- `memory_search` — when you need to look up something specific the hooks did not surface.
+- `memory_relate`, `memory_update`, `memory_delete` — for curating the graph.
 
-### Memory types
+## Memory types
 
 | Type         | Purpose                                                      |
 | ------------ | ------------------------------------------------------------ |
-| \`episodic\`   | What happened in sessions (auto-saved)                       |
-| \`pattern\`    | Corrections, rules, user preferences (injected before edits) |
-| \`semantic\`   | Project facts, architecture, conventions                     |
-| \`procedural\` | Build/test/deploy workflows (auto-saved, injected before Bash) |
-| \`working\`    | Session scratchpad (auto-cleared at SessionStart)            |
+| `episodic`   | What happened in sessions (auto-saved)                       |
+| `pattern`    | Corrections, rules, user preferences (injected before edits) |
+| `semantic`   | Project facts, architecture, conventions                     |
+| `procedural` | Build/test/deploy workflows (auto-saved, injected before Bash) |
+| `working`    | Session scratchpad (auto-cleared at SessionStart)            |
 
-### Writing good memories
+## What's worth storing
+
+**The single test: store only what a future session couldn't re-derive from the code, git history, or CLAUDE.md.** This eliminates most low-value writes.
+
+Avoid the framing "when X happens, store Y" — it produces mechanical bloat (every error logged, every command saved, every task summarized). Apply the re-derive test instead.
+
+The judgment calls the hooks can't make for you:
+
+- **`pattern`** — store immediately after any user correction. Most valuable signal, easy to miss. Include the rule and the reason so you can apply it to edge cases later.
+- **`semantic`** — store when you *infer* a non-obvious project convention or constraint. If a future session would have to re-discover it by reading multiple files or asking the user, write it down.
+- **Resolution of a problem** — don't store the fix itself if it lives in the code; `git blame` is authoritative. Store the *reasoning* that isn't recoverable from the diff (why this approach, what was rejected, what constraint forced it).
+
+## Writing good memories
 
 - Always write content and titles in English, even if the user communicates in another language.
 - One topic per memory.
@@ -285,12 +303,11 @@ Your project memory is managed by the claude-memory plugin. The plugin's hooks s
 - Use the specific terms someone would search for later — file paths, module names, error signatures.
 - Include reasoning for decisions.
 - Don't store trivial actions. Don't ask before saving — just do it silently.
-$MARKER_END"
+MEMORY_EOF
+echo "  Wrote $MEMORY_MD"
 
-mkdir -p "$(dirname "$CLAUDE_MD")"
-
+# Migration: strip any legacy inline memory section from CLAUDE.md
 if [ -f "$CLAUDE_MD" ] && grep -q "$MARKER_START" "$CLAUDE_MD"; then
-  # Replace existing section: remove old markers+content, write new
   TMPFILE="$(mktemp)"
   awk -v start="$MARKER_START" -v end="$MARKER_END" '
     $0 == start { skip=1; next }
@@ -298,15 +315,22 @@ if [ -f "$CLAUDE_MD" ] && grep -q "$MARKER_START" "$CLAUDE_MD"; then
     !skip { print }
   ' "$CLAUDE_MD" > "$TMPFILE"
   mv "$TMPFILE" "$CLAUDE_MD"
-  echo "$MEMORY_SECTION" >> "$CLAUDE_MD"
-  echo "  Updated existing memory section in CLAUDE.md"
+  echo "  Removed legacy inline memory section from CLAUDE.md"
+fi
+
+# Ensure @CLAUDE_MEMORY.md reference exists in CLAUDE.md (idempotent)
+if [ -f "$CLAUDE_MD" ] && grep -qxF "$REF_LINE" "$CLAUDE_MD"; then
+  echo "  CLAUDE.md already references CLAUDE_MEMORY.md"
 else
-  # Append to file (create if needed)
-  if [ -f "$CLAUDE_MD" ]; then
+  if [ -f "$CLAUDE_MD" ] && [ -s "$CLAUDE_MD" ]; then
+    # Ensure file ends with a newline before appending
+    if [ -n "$(tail -c 1 "$CLAUDE_MD")" ]; then
+      echo "" >> "$CLAUDE_MD"
+    fi
     echo "" >> "$CLAUDE_MD"
   fi
-  echo "$MEMORY_SECTION" >> "$CLAUDE_MD"
-  echo "  Added memory section to CLAUDE.md"
+  echo "$REF_LINE" >> "$CLAUDE_MD"
+  echo "  Added @CLAUDE_MEMORY.md reference to CLAUDE.md"
 fi
 
 echo ""
