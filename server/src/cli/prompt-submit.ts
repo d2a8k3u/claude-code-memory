@@ -24,20 +24,29 @@ export async function handlePromptSubmit(db: MemoryDatabase, input: HookInput): 
     const cache = dedupSet(cwd);
 
     const semantic = db
-      .hybridSearchMemories(prompt, embedding, caps.semantic * 2, { relevanceThreshold: TYPE_RELEVANCE.semantic })
-      .filter((r) => r.type === 'semantic' && !cache.has(r.id))
+      .hybridSearchMemories(prompt, embedding, caps.semantic * 2, {
+        relevanceThreshold: TYPE_RELEVANCE.semantic,
+        type: 'semantic',
+      })
+      .filter((r) => !cache.has(r.id))
       .slice(0, caps.semantic);
 
     const pattern = db
-      .hybridSearchMemories(prompt, embedding, caps.pattern * 2, { relevanceThreshold: TYPE_RELEVANCE.pattern })
-      .filter((r) => r.type === 'pattern' && !cache.has(r.id))
+      .hybridSearchMemories(prompt, embedding, caps.pattern * 2, {
+        relevanceThreshold: TYPE_RELEVANCE.pattern,
+        type: 'pattern',
+      })
+      .filter((r) => !cache.has(r.id))
       .slice(0, caps.pattern);
 
     let episodic: MemoryRow[] = [];
     if (isRecallStyle(prompt)) {
       episodic = db
-        .hybridSearchMemories(prompt, embedding, caps.episodic * 2, { relevanceThreshold: TYPE_RELEVANCE.episodic })
-        .filter((r) => r.type === 'episodic' && !cache.has(r.id))
+        .hybridSearchMemories(prompt, embedding, caps.episodic * 2, {
+          relevanceThreshold: TYPE_RELEVANCE.episodic,
+          type: 'episodic',
+        })
+        .filter((r) => !cache.has(r.id))
         .slice(0, caps.episodic);
     }
 

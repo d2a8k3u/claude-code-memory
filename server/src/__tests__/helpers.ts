@@ -22,6 +22,24 @@ export function makeEmbedding(seed: number): Float32Array {
   return arr;
 }
 
+/**
+ * Returns a unit vector a controlled distance from `base`. Larger `epsilon`
+ * yields a larger cosine distance. Deterministic (no RNG) so tests can assert
+ * precise neighbour ordering — unlike makeEmbedding(seed), whose pairwise
+ * distances are arbitrary.
+ */
+export function makeNearEmbedding(base: Float32Array, epsilon: number): Float32Array {
+  const arr = new Float32Array(base.length);
+  for (let i = 0; i < base.length; i++) {
+    arr[i] = base[i] + epsilon * Math.sin(i * 12.9898);
+  }
+  let norm = 0;
+  for (let i = 0; i < arr.length; i++) norm += arr[i] * arr[i];
+  norm = Math.sqrt(norm);
+  for (let i = 0; i < arr.length; i++) arr[i] /= norm;
+  return arr;
+}
+
 export function cleanup(db: MemoryDatabase, dir: string): void {
   db.close();
   rmSync(dir, { recursive: true });
@@ -43,6 +61,7 @@ export function makeMemoryRow(overrides: Partial<MemoryRow> & { id: string }): M
     access_count: 0,
     last_accessed: null,
     injection_count: 0,
+    superseded_by: null,
     ...overrides,
   };
 }

@@ -51,8 +51,8 @@ async function handleEditWrite(
   const cache = dedupSet(cwd);
 
   const results = db
-    .hybridSearchMemories(ftsQuery, embedding, 10, { relevanceThreshold: TYPE_RELEVANCE.pattern })
-    .filter((r) => r.type === 'pattern' && !cache.has(r.id))
+    .hybridSearchMemories(ftsQuery, embedding, 10, { relevanceThreshold: TYPE_RELEVANCE.pattern, type: 'pattern' })
+    .filter((r) => !cache.has(r.id))
     .slice(0, TYPE_LIMITS_PER_HOOK.preToolUse.pattern);
 
   if (results.length === 0) return empty();
@@ -104,9 +104,20 @@ async function handleReadScan(
   const embedding = await generateEmbedding(path);
   const cache = dedupSet(cwd);
 
-  const results = db
-    .hybridSearchMemories(ftsQuery, embedding, 10, { relevanceThreshold: TYPE_RELEVANCE.semantic })
-    .filter((r) => ['semantic', 'episodic'].includes(r.type) && !cache.has(r.id))
+  // semantic + episodic: two typed searches merged (vec0 partition keys don't
+  // support IN, and a post-hoc two-type filter over one untyped overfetch starves).
+  const results = [
+    ...db.hybridSearchMemories(ftsQuery, embedding, 10, {
+      relevanceThreshold: TYPE_RELEVANCE.semantic,
+      type: 'semantic',
+    }),
+    ...db.hybridSearchMemories(ftsQuery, embedding, 10, {
+      relevanceThreshold: TYPE_RELEVANCE.episodic,
+      type: 'episodic',
+    }),
+  ]
+    .filter((r) => !cache.has(r.id))
+    .sort((a, b) => b.score - a.score)
     .slice(0, TYPE_LIMITS_PER_HOOK.preToolUse.total);
 
   if (results.length === 0) return empty();
@@ -132,8 +143,8 @@ async function handleWeb(
   const cache = dedupSet(cwd);
 
   const results = db
-    .hybridSearchMemories(q, embedding, 5, { relevanceThreshold: 0.3 })
-    .filter((r) => r.type === 'semantic' && !cache.has(r.id))
+    .hybridSearchMemories(q, embedding, 5, { relevanceThreshold: 0.3, type: 'semantic' })
+    .filter((r) => !cache.has(r.id))
     .slice(0, 2);
   if (results.length === 0) return empty();
 

@@ -11,6 +11,7 @@ import { THRESHOLDS, TYPE_RELEVANCE, TYPE_LIMITS_PER_HOOK } from '../thresholds.
 import type { ScoringWeights } from '../thresholds.js';
 import { formatBlockWithRelations } from './injection-format.js';
 import { expandByRelations } from './relation-walk.js';
+import { suppressStaleProjectMemories } from './staleness.js';
 import { resetCache, markInjected } from './session-cache.js';
 
 interface SearchChannel {
@@ -105,6 +106,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   const { decayed, deleted: stalePruned } = db.decayImportanceByType();
   const relDecayed = db.decayRelationWeights();
   const relPruned = db.pruneStaleRelations();
+  const staleSuppressed = suppressStaleProjectMemories(db, cwd);
 
   const lastSweep = parseInt(db.getSessionMeta('last_sweep_session') ?? '0', 10);
   let sweepCreated = 0;
@@ -298,6 +300,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   if (episodicCleaned) cleanupParts.push(`${episodicCleaned} old episodic archived`);
   if (decayed) cleanupParts.push(`${decayed} decayed`);
   if (stalePruned) cleanupParts.push(`${stalePruned} stale pruned`);
+  if (staleSuppressed) cleanupParts.push(`${staleSuppressed} outdated-version superseded`);
   if (relDecayed) cleanupParts.push(`${relDecayed} relations decayed`);
   if (relPruned) cleanupParts.push(`${relPruned} relations pruned`);
   if (sweepCreated) cleanupParts.push(`${sweepCreated} relations discovered`);

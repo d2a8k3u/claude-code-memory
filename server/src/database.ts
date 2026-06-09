@@ -3,11 +3,83 @@ import * as sqliteVec from 'sqlite-vec';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MemoryRow, Relation, MemoryType, RelationType } from './types.js';
-import { embeddingToBuffer, bufferToEmbedding } from './embeddings.js';
+import { embeddingToBuffer, bufferToEmbedding, MODEL_NAME, EMBEDDING_DIM } from './embeddings.js';
 import { THRESHOLDS, TYPE_DECAY, RELATION_WEIGHT } from './thresholds.js';
 import type { ScoringWeights } from './thresholds.js';
 
-const SCHEMA_VERSION = 1;
+type Migration = { version: number; up: (db: Database.Database) => void };
+
+/** Adds a column if it is not already present (idempotent). */
+function addColumnIfMissing(db: Database.Database, table: string, column: string, definition: string): void {
+  const columns = db.pragma(`table_info(${table})`) as { name: string }[];
+  if (!columns.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+/**
+ * Ordered, idempotent schema migrations. A fresh database is built directly by
+ * createSchema() at the latest version and skips all migrations; an existing
+ * database runs every migration whose version is greater than its current
+ * schema_version, each inside its own transaction. Every `up` MUST be safe to
+ * re-run on a database that already has the change (use CREATE ... IF NOT EXISTS
+ * and addColumnIfMissing) so partially-patched pre-migration installs upgrade
+ * cleanly. Migrations start at v2; v1 is the base schema (createSchema).
+ */
+const MIGRATIONS: Migration[] = [
+  {
+    // v2: columns/tables previously patched in ad-hoc at startup for older installs.
+    version: 2,
+    up: (db) => {
+      addColumnIfMissing(db, 'memories', 'injection_count', 'INTEGER NOT NULL DEFAULT 0');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS relation_coactivations (
+          source_id TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          count INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (source_id, target_id),
+          FOREIGN KEY (source_id) REFERENCES memories(id) ON DELETE CASCADE,
+          FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE,
+          CHECK (source_id < target_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_coact_count ON relation_coactivations(count DESC);
+      `);
+    },
+  },
+  {
+    // v3: add a `type` partition key to memories_vec so KNN can filter by type.
+    // sqlite-vec applies the KNN LIMIT before any post-filter, so a type filter
+    // applied after the fact can miss same-type rows (broken dedup + typed search).
+    // vec0 tables can't be ALTERed or RENAMEd (shadow tables don't follow a rename),
+    // so rebuild in place: read the source-of-truth blobs from memories.embedding,
+    // drop the index, recreate it with the partition key, and repopulate.
+    version: 3,
+    up: (db) => {
+      const rows = db
+        .prepare('SELECT rowid, type, embedding FROM memories WHERE embedding IS NOT NULL')
+        .all() as { rowid: number; type: string; embedding: Buffer }[];
+      db.exec('DROP TABLE IF EXISTS memories_vec');
+      db.exec(
+        `CREATE VIRTUAL TABLE memories_vec USING vec0(embedding float[384] distance_metric=cosine, type text partition key)`,
+      );
+      const ins = db.prepare('INSERT INTO memories_vec (rowid, embedding, type) VALUES (?, ?, ?)');
+      for (const r of rows) {
+        ins.run(BigInt(r.rowid), bufferToEmbedding(r.embedding), r.type);
+      }
+    },
+  },
+  {
+    // v4: supersession marker. Non-null = superseded (stale), excluded from search
+    // and injection but kept in the DB. Set by version-bump supersession-on-write or
+    // by the project-version staleness pass.
+    version: 4,
+    up: (db) => {
+      addColumnIfMissing(db, 'memories', 'superseded_by', 'TEXT');
+    },
+  },
+];
+
+const SCHEMA_VERSION = MIGRATIONS.length > 0 ? MIGRATIONS[MIGRATIONS.length - 1].version : 1;
 
 function sanitizeFtsQuery(query: string): string {
   const terms = query.split(/\s+/).filter(Boolean);
@@ -42,6 +114,13 @@ export function contentLengthPenalty(contentLength: number): number {
 export type RelevanceFilterOptions = {
   topicThreshold?: number;
   relevanceThreshold?: number;
+  /**
+   * Restrict the search to one memory type. Pushed into BOTH the FTS query and the
+   * vec0 KNN (via the partition key) so the limit is applied within the type — a
+   * post-hoc `.filter(r => r.type === t)` would starve typed searches when other
+   * types dominate the candidate pool.
+   */
+  type?: MemoryType;
 };
 
 export interface ScoredMemoryRow extends MemoryRow {
@@ -73,33 +152,62 @@ export class MemoryDatabase {
     if (!row) {
       this.createSchema();
       this.db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(SCHEMA_VERSION);
-    } else if (row.version < SCHEMA_VERSION) {
-      // No migration — fresh start at v1
-      this.db.prepare('UPDATE schema_version SET version = ?').run(SCHEMA_VERSION);
+    } else {
+      this.runMigrations(row.version);
     }
 
-    this.addColumnIfMissing('memories', 'injection_count', 'INTEGER NOT NULL DEFAULT 0');
-
-    // Ensure relation_coactivations table exists (additive for existing installs)
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS relation_coactivations (
-        source_id TEXT NOT NULL,
-        target_id TEXT NOT NULL,
-        count INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (source_id, target_id),
-        FOREIGN KEY (source_id) REFERENCES memories(id) ON DELETE CASCADE,
-        FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE,
-        CHECK (source_id < target_id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_coact_count ON relation_coactivations(count DESC);
-    `);
+    this.ensureEmbeddingMeta();
   }
 
-  private addColumnIfMissing(table: string, column: string, definition: string): void {
-    const columns = this.db.pragma(`table_info(${table})`) as { name: string }[];
-    if (!columns.some((c) => c.name === column)) {
-      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  /** Runs every migration newer than currentVersion, each inside its own transaction. */
+  private runMigrations(currentVersion: number): void {
+    for (const migration of MIGRATIONS) {
+      if (migration.version <= currentVersion) continue;
+      const tx = this.db.transaction(() => {
+        migration.up(this.db);
+        this.db.prepare('UPDATE schema_version SET version = ?').run(migration.version);
+      });
+      tx();
     }
+  }
+
+  /**
+   * Records the embedding model + dimension this database was built with, and
+   * fails loudly if a later open uses a different model/dimension. The vec0 index
+   * is a fixed `float[EMBEDDING_DIM]`, so silently writing vectors of a different
+   * model or dimension would corrupt search; detection here turns that into a
+   * clear, actionable error instead. First open (or a pre-meta install) seeds the
+   * values rather than failing.
+   */
+  private ensureEmbeddingMeta(): void {
+    const storedModel = this.getSessionMeta('embedding_model');
+    const storedDim = this.getSessionMeta('embedding_dim');
+
+    if (storedModel === null && storedDim === null) {
+      this.setSessionMeta('embedding_model', MODEL_NAME);
+      this.setSessionMeta('embedding_dim', String(EMBEDDING_DIM));
+      return;
+    }
+
+    if (storedDim !== null && storedDim !== String(EMBEDDING_DIM)) {
+      throw new Error(
+        `Embedding dimension mismatch: database was built with dim=${storedDim} but the current ` +
+          `model produces dim=${EMBEDDING_DIM}. The vec0 index cannot mix dimensions. Re-embed the ` +
+          `database or point at a model with dim=${storedDim}.`,
+      );
+    }
+
+    if (storedModel !== null && storedModel !== MODEL_NAME) {
+      throw new Error(
+        `Embedding model mismatch: database was built with "${storedModel}" but the current model is ` +
+          `"${MODEL_NAME}". Mixing models degrades similarity search. Re-embed the database or restore ` +
+          `the original model.`,
+      );
+    }
+
+    // Backfill a missing half (e.g. dim recorded but model not) without failing.
+    if (storedModel === null) this.setSessionMeta('embedding_model', MODEL_NAME);
+    if (storedDim === null) this.setSessionMeta('embedding_dim', String(EMBEDDING_DIM));
   }
 
   private createSchema(): void {
@@ -118,6 +226,7 @@ export class MemoryDatabase {
         access_count INTEGER NOT NULL DEFAULT 0,
         last_accessed TEXT,
         injection_count INTEGER NOT NULL DEFAULT 0,
+        superseded_by TEXT,
         embedding BLOB
       );
 
@@ -140,7 +249,8 @@ export class MemoryDatabase {
       CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(
-        embedding float[384] distance_metric=cosine
+        embedding float[384] distance_metric=cosine,
+        type text partition key
       );
 
       CREATE TABLE IF NOT EXISTS meta (
@@ -172,13 +282,13 @@ export class MemoryDatabase {
       INSERT INTO memories_fts (rowid, title, content, tags)
       VALUES ((SELECT rowid FROM memories WHERE id = @id), @title, @content, @tags)
     `);
-    const insertVec = this.db.prepare('INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)');
+    const insertVec = this.db.prepare('INSERT INTO memories_vec (rowid, embedding, type) VALUES (?, ?, ?)');
     const tx = this.db.transaction((m: MemoryRow & { embedding?: Buffer | null }) => {
       insert.run({ ...m, embedding: m.embedding ?? null });
       insertFts.run({ id: m.id, title: m.title ?? '', content: m.content, tags: m.tags });
       if (m.embedding) {
         const rowid = (this.db.prepare('SELECT rowid FROM memories WHERE id = ?').get(m.id) as { rowid: number }).rowid;
-        insertVec.run(BigInt(rowid), bufferToEmbedding(m.embedding));
+        insertVec.run(BigInt(rowid), bufferToEmbedding(m.embedding), m.type);
       }
     });
     tx(memory);
@@ -188,12 +298,14 @@ export class MemoryDatabase {
     const buf = embeddingToBuffer(embedding);
     const tx = this.db.transaction(() => {
       this.db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(buf, id);
-      const rowid = (
-        this.db.prepare('SELECT rowid FROM memories WHERE id = ?').get(id) as { rowid: number } | undefined
-      )?.rowid;
-      if (rowid !== undefined) {
-        this.db.prepare('DELETE FROM memories_vec WHERE rowid = ?').run(rowid);
-        this.db.prepare('INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)').run(BigInt(rowid), embedding);
+      const row = this.db.prepare('SELECT rowid, type FROM memories WHERE id = ?').get(id) as
+        | { rowid: number; type: MemoryType }
+        | undefined;
+      if (row !== undefined) {
+        this.db.prepare('DELETE FROM memories_vec WHERE rowid = ?').run(row.rowid);
+        this.db
+          .prepare('INSERT INTO memories_vec (rowid, embedding, type) VALUES (?, ?, ?)')
+          .run(BigInt(row.rowid), embedding, row.type);
       }
     });
     tx();
@@ -313,6 +425,7 @@ export class MemoryDatabase {
     filter?: RelevanceFilterOptions,
     weights?: ScoringWeights,
   ): ScoredMemoryRow[] {
+    const type = filter?.type;
     const ftsResults = new Map<string, { row: MemoryRow; ftsScore: number }>();
     const safeQuery = sanitizeFtsQuery(query);
     if (safeQuery) {
@@ -321,11 +434,13 @@ export class MemoryDatabase {
           .prepare(
             `SELECT m.*, rank as fts_rank FROM memories m
              JOIN memories_fts fts ON fts.rowid = m.rowid
-             WHERE memories_fts MATCH @query
+             WHERE memories_fts MATCH @query${type ? ' AND m.type = @type' : ''}
              ORDER BY rank
              LIMIT @limit`,
           )
-          .all({ query: safeQuery, limit: limit * 2 }) as (MemoryRow & { fts_rank: number })[];
+          .all(
+            type ? { query: safeQuery, limit: limit * 2, type } : { query: safeQuery, limit: limit * 2 },
+          ) as (MemoryRow & { fts_rank: number })[];
 
         for (const row of ftsRows) {
           const rawScore = Math.min(1, Math.max(0, -row.fts_rank / 20));
@@ -338,19 +453,35 @@ export class MemoryDatabase {
 
     const vectorResults = new Map<string, { row: MemoryRow; vecScore: number }>();
     if (queryEmbedding) {
-      const vecRows = this.db
-        .prepare(
-          `SELECT v.vec_rowid, v.distance, m.*
-           FROM (
-             SELECT rowid AS vec_rowid, distance
-             FROM memories_vec
-             WHERE embedding MATCH ?
-             ORDER BY distance
-             LIMIT ?
-           ) v
-           JOIN memories m ON m.rowid = v.vec_rowid`,
-        )
-        .all(queryEmbedding, limit * 2) as (MemoryRow & { distance: number; vec_rowid: number })[];
+      // With a type filter, push it into the KNN via the partition key (`AND k = ? AND type = ?`)
+      // so the limit is applied within the type. Otherwise scan all partitions.
+      const vecRows = (
+        type
+          ? this.db
+              .prepare(
+                `SELECT v.vec_rowid, v.distance, m.*
+                 FROM (
+                   SELECT rowid AS vec_rowid, distance
+                   FROM memories_vec
+                   WHERE embedding MATCH ? AND k = ? AND type = ?
+                 ) v
+                 JOIN memories m ON m.rowid = v.vec_rowid`,
+              )
+              .all(queryEmbedding, limit * 2, type)
+          : this.db
+              .prepare(
+                `SELECT v.vec_rowid, v.distance, m.*
+                 FROM (
+                   SELECT rowid AS vec_rowid, distance
+                   FROM memories_vec
+                   WHERE embedding MATCH ?
+                   ORDER BY distance
+                   LIMIT ?
+                 ) v
+                 JOIN memories m ON m.rowid = v.vec_rowid`,
+              )
+              .all(queryEmbedding, limit * 2)
+      ) as (MemoryRow & { distance: number; vec_rowid: number })[];
 
       for (const row of vecRows) {
         const similarity = 1 - row.distance;
@@ -372,38 +503,34 @@ export class MemoryDatabase {
       const vec = vectorResults.get(id);
       const row = fts?.row ?? vec?.row;
       if (!row) continue;
+      // Superseded (stale) memories never surface in search or injection.
+      if (row.superseded_by != null) continue;
 
       const ftsScore = fts?.ftsScore ?? 0;
       const vecScore = vec?.vecScore ?? 0;
 
-      // Blend FTS and vector scores only when both signals exist for this memory.
-      // If a memory was found by FTS only (no embedding in vec), use full ftsScore
-      // to avoid diluting it by the 0.4 weight when vecScore is 0.
-      let textScore: number;
-      if (fts && vec) {
-        textScore = ftsScore * 0.4 + vecScore * 0.6;
-      } else if (vec) {
-        textScore = vecScore;
-      } else {
-        textScore = ftsScore;
-      }
+      // Probabilistic-OR (noisy-OR) fusion of the two signals. It is monotonic — a
+      // dual-signal match always scores >= max(its single-signal scores), since
+      // a + b - a*b - a = b*(1 - a) >= 0 (and symmetrically >= b) — so finding a
+      // memory by both FTS and vector can never rank it below finding it by one.
+      // (The old `fts*0.4 + vec*0.6` blend violated this: a floored FTS score of
+      // 0.05 plus a strong vec score of 0.9 gave 0.56, below the 0.9 vec-only score.)
+      // Single-signal cases collapse to the present operand (the other is 0), and the
+      // result stays in [0,1] so the topic/relevance thresholds and strictness presets
+      // keep their meaning.
+      const textScore = ftsScore + vecScore - ftsScore * vecScore;
 
       if (textScore < topicThreshold) continue;
 
       const ageMs = now - new Date(row.created_at).getTime();
       const ageDays = ageMs / (1000 * 60 * 60 * 24);
       const recencyBoost = recencyScore(ageDays);
-      const accessBoost = Math.min(1, Math.log2(row.access_count + 1) / 5);
       const importanceWeight = row.importance;
       const lengthPenalty = contentLengthPenalty(row.content.length);
 
       const finalScore = Math.max(
         0,
-        textScore * w.textScore +
-          importanceWeight * w.importance +
-          recencyBoost * w.recency +
-          accessBoost * w.access -
-          lengthPenalty,
+        textScore * w.textScore + importanceWeight * w.importance + recencyBoost * w.recency - lengthPenalty,
       );
 
       if (relevanceThreshold > 0 && finalScore < relevanceThreshold) continue;
@@ -890,28 +1017,37 @@ export class MemoryDatabase {
     threshold: number = THRESHOLDS.EXACT_DUPLICATE,
     type?: MemoryType,
   ): { id: string; distance: number } | null {
-    const sql = type
-      ? `SELECT v.vec_rowid, v.distance, m.id
-         FROM (
-           SELECT rowid AS vec_rowid, distance
-           FROM memories_vec
-           WHERE embedding MATCH ?
-           ORDER BY distance
-           LIMIT 5
-         ) v
-         JOIN memories m ON m.rowid = v.vec_rowid
-         WHERE m.type = ?`
-      : `SELECT v.vec_rowid, v.distance, m.id
-         FROM (
-           SELECT rowid AS vec_rowid, distance
-           FROM memories_vec
-           WHERE embedding MATCH ?
-           ORDER BY distance
-           LIMIT 1
-         ) v
-         JOIN memories m ON m.rowid = v.vec_rowid`;
-
-    const rows = (type ? this.db.prepare(sql).all(embedding, type) : this.db.prepare(sql).all(embedding)) as {
+    // With a type filter, push it into the KNN via the partition key so the nearest
+    // SAME-TYPE row is returned even when many other-type rows are closer. The old
+    // form took the global 5 nearest then filtered by type, missing same-type
+    // duplicates ranked > 5 — store/consolidation dedup silently kept duplicates.
+    const rows = (
+      type
+        ? this.db
+            .prepare(
+              `SELECT v.vec_rowid, v.distance, m.id
+               FROM (
+                 SELECT rowid AS vec_rowid, distance
+                 FROM memories_vec
+                 WHERE embedding MATCH ? AND k = ? AND type = ?
+               ) v
+               JOIN memories m ON m.rowid = v.vec_rowid`,
+            )
+            .all(embedding, 1, type)
+        : this.db
+            .prepare(
+              `SELECT v.vec_rowid, v.distance, m.id
+               FROM (
+                 SELECT rowid AS vec_rowid, distance
+                 FROM memories_vec
+                 WHERE embedding MATCH ?
+                 ORDER BY distance
+                 LIMIT 1
+               ) v
+               JOIN memories m ON m.rowid = v.vec_rowid`,
+            )
+            .all(embedding)
+    ) as {
       id: string;
       distance: number;
       vec_rowid: number;
@@ -1007,20 +1143,20 @@ export class MemoryDatabase {
 
     for (const row of rows) {
       const emb = bufferToEmbedding(row.embedding);
+      // Push the type into the KNN via the partition key (k covers self + neighbours
+      // within the type), so same-type near-duplicates ranked > 5 globally are still
+      // found — the old `LIMIT 5` then `WHERE m.type` form missed them.
       const neighbors = this.db
         .prepare(
           `SELECT v.distance, m.id
            FROM (
              SELECT rowid AS vec_rowid, distance
              FROM memories_vec
-             WHERE embedding MATCH ?
-             ORDER BY distance
-             LIMIT 5
+             WHERE embedding MATCH ? AND k = ? AND type = ?
            ) v
-           JOIN memories m ON m.rowid = v.vec_rowid
-           WHERE m.type = ?`,
+           JOIN memories m ON m.rowid = v.vec_rowid`,
         )
-        .all(emb, type) as { id: string; distance: number }[];
+        .all(emb, 6, type) as { id: string; distance: number }[];
 
       for (const n of neighbors) {
         if (n.id === row.id) continue;
@@ -1066,17 +1202,36 @@ export class MemoryDatabase {
 
   getRecentByType(type: string, limit: number): MemoryRow[] {
     return this.db
-      .prepare('SELECT * FROM memories WHERE type = ? ORDER BY created_at DESC LIMIT ?')
+      .prepare('SELECT * FROM memories WHERE type = ? AND superseded_by IS NULL ORDER BY created_at DESC LIMIT ?')
       .all(type, limit) as MemoryRow[];
   }
 
   getTopByImportance(type: string, minImportance: number, limit: number): MemoryRow[] {
     return this.db
       .prepare(
-        `SELECT * FROM memories WHERE type = ? AND importance >= ?
+        `SELECT * FROM memories WHERE type = ? AND importance >= ? AND superseded_by IS NULL
          ORDER BY importance DESC, access_count DESC LIMIT ?`,
       )
       .all(type, minImportance, limit) as MemoryRow[];
+  }
+
+  /**
+   * Marks `id` as superseded by `by` — either the id of a newer memory, or a
+   * `project:<version>` sentinel from the staleness pass. Superseded memories are
+   * excluded from search/injection but retained (visible via memory_list).
+   */
+  markSuperseded(id: string, by: string): void {
+    this.db.prepare('UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id = ?').run(by, new Date().toISOString(), id);
+  }
+
+  /** Semantic + pattern memories that are not yet superseded — input to the staleness pass. */
+  getActiveByTypeForStaleness(): { id: string; type: string; title: string | null; content: string }[] {
+    return this.db
+      .prepare(
+        `SELECT id, type, title, content FROM memories
+         WHERE type IN ('semantic', 'pattern') AND superseded_by IS NULL`,
+      )
+      .all() as { id: string; type: string; title: string | null; content: string }[];
   }
 
   // --- Health & Curation ---
