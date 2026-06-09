@@ -11,6 +11,9 @@ function truncate(s: string, max = 120): string {
   return s.slice(0, max - 1).replace(/\s+\S*$/, '') + '…';
 }
 
+// Patterns are rules to act on; give them room so a directive is never cut mid-rule.
+const PATTERN_MAX = 300;
+
 function typeLabel(m: MemoryRow): string {
   const star = m.type === 'pattern' && m.importance >= HIGH_IMPORTANCE ? ' ★' : '';
   if (m.type === 'episodic') {
@@ -27,6 +30,12 @@ export function formatMemoryLine(m: MemoryRow, relationType?: string): string {
   const prefix = title ? `${title} — ` : '';
   if (relationType) {
     return `  - [${m.type} → ${relationType}] ${prefix}${truncate(content, 140)}`;
+  }
+  // Patterns/corrections are rules to apply, not trivia to note — surface them as an
+  // explicit directive and don't truncate mid-rule (generous cap keeps the rule intact).
+  if (m.type === 'pattern') {
+    const body = title ? `${title}: ${truncate(content, PATTERN_MAX)}` : truncate(content, PATTERN_MAX);
+    return `- ${label} Apply — ${body}`;
   }
   return `- ${label} ${prefix}${truncate(content, 180)}`;
 }
@@ -50,6 +59,8 @@ export function formatWarningBlock(m: MemoryRow, filePath: string): string {
 
 ⚠️ **Prior rule applies to \`${filePath}\`:**
 ${title ? `**${title}** — ` : ''}${content}
+
+Apply this rule, or state why it does not apply, before continuing.
 `;
 }
 
