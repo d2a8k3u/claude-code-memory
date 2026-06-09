@@ -22,14 +22,17 @@ export interface TurnContext {
 
 export type InsightCandidate = MemoryRow & { embedding?: Buffer | null };
 
+// Imperative correction signals directed at the assistant. Bare "don't" and
+// "actually" were removed: they fire on non-corrections like "I don't know how this
+// works" or "actually that makes sense". "don't" now requires a following imperative
+// verb so it reads as a directive ("don't use X"), not a statement of uncertainty.
 const CORRECTION_SIGNALS = [
-  /\bdon['']?t\b/i,
+  /\bdon['']?t\s+(?:use|do|add|create|change|put|write|call|make|set|name|import|return|run|commit|hardcode|delete|remove)\b/i,
   /\bnever\b/i,
   /\bwrong way\b/i,
   /\bnope\b/i,
   /\bstop doing\b/i,
   /\binstead (?:of|use)\b/i,
-  /\bactually\b/i,
   /\bnot (?:like (?:that|this)|the way)\b/i,
   /\brather (?:than|use)\b/i,
 ];

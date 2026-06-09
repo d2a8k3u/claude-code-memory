@@ -355,6 +355,7 @@ describe('computeSubstanceScore', () => {
       computeSubstanceScore({
         toolsUsed: [],
         filesModified: [],
+        filesRead: [],
         errorCount: 0,
         memoryStores: 0,
         bashCommands: [],
@@ -367,6 +368,7 @@ describe('computeSubstanceScore', () => {
     const score = computeSubstanceScore({
       toolsUsed: ['Bash'],
       filesModified: [],
+      filesRead: [],
       errorCount: 0,
       memoryStores: 0,
       bashCommands: [{ command: 'npm test', success: true, category: 'test' }],
@@ -379,6 +381,7 @@ describe('computeSubstanceScore', () => {
     const score = computeSubstanceScore({
       toolsUsed: ['Edit', 'Bash'],
       filesModified: ['/src/a.ts'],
+      filesRead: [],
       errorCount: 0,
       memoryStores: 0,
       bashCommands: [{ command: 'npm test', success: true, category: 'test' }],
@@ -391,6 +394,7 @@ describe('computeSubstanceScore', () => {
     const score = computeSubstanceScore({
       toolsUsed: ['Bash'],
       filesModified: [],
+      filesRead: [],
       errorCount: 0,
       memoryStores: 0,
       bashCommands: Array.from({ length: 10 }, () => ({
@@ -406,6 +410,7 @@ describe('computeSubstanceScore', () => {
     const score = computeSubstanceScore({
       toolsUsed: ['Bash'],
       filesModified: [],
+      filesRead: [],
       errorCount: 0,
       memoryStores: 0,
       bashCommands: [
@@ -423,6 +428,7 @@ describe('computeSubstanceScore', () => {
     const score = computeSubstanceScore({
       toolsUsed: ['Bash'],
       filesModified: [],
+      filesRead: [],
       errorCount: 3,
       memoryStores: 0,
       bashCommands: [{ command: 'npm test', success: false, category: 'test' }],
@@ -435,11 +441,38 @@ describe('computeSubstanceScore', () => {
     const score = computeSubstanceScore({
       toolsUsed: ['Bash'],
       filesModified: [],
+      filesRead: [],
       errorCount: 0,
       memoryStores: 3,
       bashCommands: [{ command: 'npm test', success: true, category: 'test' }],
     });
     assert.equal(score, 6); // 1*2 + 0 + 0 + 3 + 1
+  });
+
+  it('credits a deep single-tool read session so genuine learning is not dropped', () => {
+    const score = computeSubstanceScore({
+      toolsUsed: ['Read'], // one distinct tool name -> only 2 from toolsUsed
+      filesModified: [],
+      filesRead: ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'],
+      errorCount: 0,
+      memoryStores: 0,
+      bashCommands: [],
+    });
+    assert.equal(score, 7); // 1*2 + 0 + min(5,6) + 0 + 0 + 0
+    assert.ok(score >= SUBSTANCE_THRESHOLD, 'deep read session clears the threshold');
+  });
+
+  it('keeps a trivial peek below the threshold', () => {
+    const score = computeSubstanceScore({
+      toolsUsed: ['Bash'],
+      filesModified: [],
+      filesRead: ['one.ts'],
+      errorCount: 0,
+      memoryStores: 0,
+      bashCommands: [{ command: 'git status', success: true, category: 'git' }], // trivial
+    });
+    assert.equal(score, 3); // 1*2 + 0 + min(1,6) + 0 + 0 + 0 (git status is trivial)
+    assert.ok(score < SUBSTANCE_THRESHOLD, 'a trivial peek is not saved');
   });
 });
 
@@ -1160,12 +1193,12 @@ describe('handleSessionEnd - turn-extractor integration', () => {
       db.insertMemory({
         id: 'COACT_A', type: 'semantic', title: 'A', content: 'a', context: null, source: null,
         tags: '[]', importance: 0.5, created_at: now, updated_at: now,
-        access_count: 0, last_accessed: null, injection_count: 0,
+        access_count: 0, last_accessed: null, injection_count: 0, superseded_by: null,
       });
       db.insertMemory({
         id: 'COACT_B', type: 'semantic', title: 'B', content: 'b', context: null, source: null,
         tags: '[]', importance: 0.5, created_at: now, updated_at: now,
-        access_count: 0, last_accessed: null, injection_count: 0,
+        access_count: 0, last_accessed: null, injection_count: 0, superseded_by: null,
       });
       resetCache(dir, '1');
       markInjected(dir, ['COACT_A', 'COACT_B']);

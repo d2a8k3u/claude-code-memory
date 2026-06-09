@@ -52,6 +52,40 @@ test('extractUserCorrection returns null when user message has no signal', () =>
   assert.equal(c, null);
 });
 
+test('extractUserCorrection ignores bare "don\'t" / "actually" non-corrections', () => {
+  // "I don't know" previously matched bare /don't/ and produced a junk pattern.
+  assert.equal(
+    extractUserCorrection(
+      ctx({
+        userMessage: "I don't know how this works, can you explain?",
+        toolCalls: [{ name: 'Edit', input: { file_path: 'a.ts' }, output: 'ok' }],
+      }),
+    ),
+    null,
+  );
+  // "actually" previously matched on its own.
+  assert.equal(
+    extractUserCorrection(
+      ctx({
+        userMessage: 'Actually that makes sense, thanks.',
+        toolCalls: [{ name: 'Edit', input: { file_path: 'a.ts' }, output: 'ok' }],
+      }),
+    ),
+    null,
+  );
+});
+
+test('extractUserCorrection still fires on an imperative "don\'t <verb>" directive', () => {
+  const c = extractUserCorrection(
+    ctx({
+      userMessage: "Don't hardcode the path, use a config value instead.",
+      toolCalls: [{ name: 'Edit', input: { file_path: 'a.ts' }, output: 'ok' }],
+    }),
+  );
+  assert.ok(c, 'imperative correction still detected');
+  assert.equal(c!.type, 'pattern');
+});
+
 test('extractNewFact emits semantic when unknown module is mentioned', async () => {
   const db = createTestDb();
   try {

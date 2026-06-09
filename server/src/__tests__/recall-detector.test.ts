@@ -18,3 +18,21 @@ test('Empty / very short prompts return false', () => {
   assert.equal(isRecallStyle(''), false);
   assert.equal(isRecallStyle('ok'), false);
 });
+
+test('bare temporal words no longer trigger recall on their own', () => {
+  // These previously matched bare /before/, /earlier/, /previously/, /yesterday/.
+  assert.equal(isRecallStyle('Read the file before you edit it.'), false);
+  assert.equal(isRecallStyle('Move this earlier in the function.'), false);
+  assert.equal(isRecallStyle('Run the build, as previously configured.'), false);
+});
+
+test('past-tense question not about shared work is not recall', () => {
+  // Previously any "?" + past-tense verb triggered recall.
+  assert.equal(isRecallStyle('Did you read the README?'), false);
+  assert.equal(isRecallStyle('Was the file saved correctly?'), false);
+});
+
+test('temporal word WITH a shared-work cue is still recall', () => {
+  assert.ok(isRecallStyle('What did you change earlier?'));
+  assert.ok(isRecallStyle('Did we already fix the auth bug?'));
+});
