@@ -13,9 +13,31 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node {{PLUGIN_DIR}}/server/dist/cli.js prompt-submit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node {{PLUGIN_DIR}}/server/dist/cli.js pre-tool-use",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
-        "matcher": { "tool_name": "Bash" },
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
