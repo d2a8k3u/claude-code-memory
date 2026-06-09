@@ -58,19 +58,22 @@ export const THRESHOLDS = {
   EPISODIC_ARCHIVE_MAX_ACCESS: 1,
 
   // --- Scoring weights ---
+  // The former `access` weight (0.1) was dead in the autonomous flow: access_count
+  // is only incremented by the memory_get MCP tool, never by hook-driven search or
+  // injection, so it contributed ~0 there (and near-0 elsewhere). Its weight is
+  // folded into `recency`, which also helps demote stale-but-on-topic memories.
   /** Default scoring weights for hybridSearchMemories */
-  SCORING_WEIGHTS: { textScore: 0.5, importance: 0.2, recency: 0.2, access: 0.1 },
+  SCORING_WEIGHTS: { textScore: 0.5, importance: 0.2, recency: 0.3 },
   /** Branch-channel preset: higher recency to favor recent work on the branch */
-  SCORING_WEIGHTS_BRANCH: { textScore: 0.4, importance: 0.15, recency: 0.35, access: 0.1 },
+  SCORING_WEIGHTS_BRANCH: { textScore: 0.4, importance: 0.15, recency: 0.45 },
   /** CWD-channel preset: higher importance for project-level knowledge */
-  SCORING_WEIGHTS_CWD: { textScore: 0.4, importance: 0.3, recency: 0.2, access: 0.1 },
+  SCORING_WEIGHTS_CWD: { textScore: 0.4, importance: 0.3, recency: 0.3 },
 } as const;
 
 export type ScoringWeights = {
   readonly textScore: number;
   readonly importance: number;
   readonly recency: number;
-  readonly access: number;
 };
 
 // --- Per-type relevance thresholds for hook-triggered searches ---
@@ -132,7 +135,12 @@ export const RELATION_WEIGHT = {
   strongThreshold: 0.5,
   floor: 0.05,
   decayPerSession: 0.005,
-  boostOnCoInject: 0.05,
+  // Co-injection (two memories surfaced together) is a weak signal — being shown
+  // does not mean being used. Set equal to decayPerSession so injection ALONE is
+  // net-neutral (it offsets decay but can't ratchet a relation toward 1.0), which
+  // stops a stale sibling cluster from entrenching itself just by being injected.
+  // Real reinforcement comes from co-ACCESS below.
+  boostOnCoInject: 0.005,
   boostOnCoAccess: 0.1,
   coActivationPromotionCount: 3,
   sweepCadenceSessions: 20,

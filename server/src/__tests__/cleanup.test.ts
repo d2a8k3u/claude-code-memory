@@ -25,6 +25,7 @@ test('rewriteLegacyTitles converts **Task:** prefix content into prose', async (
       access_count: 0,
       last_accessed: null,
       injection_count: 0,
+      superseded_by: null,
     });
     const { rewritten } = await rewriteLegacyTitles(db);
     assert.equal(rewritten, 1);
@@ -54,6 +55,7 @@ test('rewriteLegacyTitles ignores already-clean episodics', async () => {
       access_count: 0,
       last_accessed: null,
       injection_count: 0,
+      superseded_by: null,
     });
     const { rewritten } = await rewriteLegacyTitles(db);
     assert.equal(rewritten, 0);

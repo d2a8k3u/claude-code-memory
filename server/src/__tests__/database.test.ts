@@ -1,9 +1,13 @@
-import { describe, it, beforeEach, test } from 'node:test';
+import { describe, it, beforeEach, afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
 import { MemoryDatabase, recencyScore, contentLengthPenalty } from '../database.js';
+import { MODEL_NAME, EMBEDDING_DIM, embeddingToBuffer, bufferToEmbedding } from '../embeddings.js';
 import { THRESHOLDS } from '../thresholds.js';
-import { rmSync, statSync } from 'node:fs';
+import { rmSync, statSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { makeTempDb, makeEmbedding, cleanup, makeMemoryRow } from './helpers.js';
 
 // ==========================================================
@@ -24,6 +28,259 @@ describe('MemoryDatabase - schema', () => {
     assert.equal(db2.countMemories(), 0);
     db2.close();
     rmSync(dir, { recursive: true });
+  });
+});
+
+// ==========================================================
+// Schema migrations
+// ==========================================================
+describe('MemoryDatabase - migrations', () => {
+  it('upgrades a pre-migration database without data loss', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'claude-mem-test-'));
+    const dbPath = join(dir, 'memory.sqlite');
+
+    // 1. Build a current database and insert rows.
+    const db1 = new MemoryDatabase(dbPath);
+    db1.insertMemory(makeMemoryRow({ id: 'mem1', content: 'first memory' }));
+    db1.insertMemory(makeMemoryRow({ id: 'mem2', content: 'second memory' }));
+    db1.close();
+
+    // 2. Downgrade the file to a pre-v2 shape (no injection_count column, no
+    //    relation_coactivations table, schema_version = 1) to simulate an old install.
+    const raw = new Database(dbPath);
+    sqliteVec.load(raw);
+    raw.exec('ALTER TABLE memories DROP COLUMN injection_count');
+    raw.exec('DROP TABLE relation_coactivations');
+    raw.prepare('UPDATE schema_version SET version = ?').run(1);
+    raw.close();
+
+    // 3. Reopen through MemoryDatabase — migrations should run inside a transaction.
+    const db2 = new MemoryDatabase(dbPath);
+    assert.equal(db2.countMemories(), 2, 'rows survive migration');
+    db2.close();
+
+    // 4. Inspect the migrated schema directly.
+    const check = new Database(dbPath);
+    sqliteVec.load(check);
+    const cols = (check.pragma('table_info(memories)') as { name: string }[]).map((c) => c.name);
+    assert.ok(cols.includes('injection_count'), 'injection_count column restored');
+    const tbl = check
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='relation_coactivations'")
+      .get();
+    assert.ok(tbl, 'relation_coactivations table restored');
+    const ver = (check.prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number }).version;
+    // Latest migration version — keep in sync with database.ts MIGRATIONS (currently v3).
+    assert.ok(ver >= 2, 'schema_version bumped to latest');
+    check.close();
+
+    rmSync(dir, { recursive: true });
+  });
+
+  it('rebuilds the vector index with a type partition key, preserving all vectors', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'claude-mem-test-'));
+    const dbPath = join(dir, 'memory.sqlite');
+
+    // 1. Current DB with two embedded memories of different types.
+    const db1 = new MemoryDatabase(dbPath);
+    db1.insertMemory({ ...makeMemoryRow({ id: 'a', type: 'semantic' }), embedding: embeddingToBuffer(makeEmbedding(1)) });
+    db1.insertMemory({ ...makeMemoryRow({ id: 'b', type: 'episodic' }), embedding: embeddingToBuffer(makeEmbedding(2)) });
+    db1.close();
+
+    // 2. Downgrade memories_vec to the old, no-partition shape (schema_version = 2).
+    const raw = new Database(dbPath);
+    sqliteVec.load(raw);
+    raw.exec('DROP TABLE memories_vec');
+    raw.exec('CREATE VIRTUAL TABLE memories_vec USING vec0(embedding float[384] distance_metric=cosine)');
+    const old = raw.prepare('SELECT rowid, embedding FROM memories WHERE embedding IS NOT NULL').all() as {
+      rowid: number;
+      embedding: Buffer;
+    }[];
+    const reins = raw.prepare('INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)');
+    for (const r of old) reins.run(BigInt(r.rowid), bufferToEmbedding(r.embedding));
+    raw.prepare('UPDATE schema_version SET version = ?').run(2);
+    raw.close();
+
+    // 3. Reopen — migration v3 rebuilds the index in place.
+    const db2 = new MemoryDatabase(dbPath);
+    db2.close();
+
+    // 4. Verify the rebuilt table has the partition key and kept every vector.
+    const check = new Database(dbPath);
+    sqliteVec.load(check);
+    const sql = (check.prepare("SELECT sql FROM sqlite_master WHERE name = 'memories_vec'").get() as { sql: string })
+      .sql;
+    assert.ok(/partition key/i.test(sql), 'rebuilt vec table has a type partition key');
+    const count = (check.prepare('SELECT count(*) AS c FROM memories_vec').get() as { c: number }).c;
+    assert.equal(count, 2, 'all vectors preserved through rebuild');
+    check.close();
+
+    rmSync(dir, { recursive: true });
+  });
+});
+
+// ==========================================================
+// Embedding model/dimension guard
+// ==========================================================
+describe('MemoryDatabase - embedding guard', () => {
+  it('seeds embedding model + dimension on a fresh database', () => {
+    const { db, dir } = makeTempDb();
+    assert.equal(db.getSessionMeta('embedding_model'), MODEL_NAME);
+    assert.equal(db.getSessionMeta('embedding_dim'), String(EMBEDDING_DIM));
+    cleanup(db, dir);
+  });
+
+  it('throws loudly when the stored embedding dimension differs', () => {
+    const { db, dir } = makeTempDb();
+    db.setSessionMeta('embedding_dim', '768');
+    db.close();
+    const dbPath = join(dir, 'memory.sqlite');
+    assert.throws(() => new MemoryDatabase(dbPath), /dimension mismatch/i);
+    rmSync(dir, { recursive: true });
+  });
+
+  it('throws loudly when the stored embedding model differs', () => {
+    const { db, dir } = makeTempDb();
+    db.setSessionMeta('embedding_model', 'some/other-model');
+    db.close();
+    const dbPath = join(dir, 'memory.sqlite');
+    assert.throws(() => new MemoryDatabase(dbPath), /model mismatch/i);
+    rmSync(dir, { recursive: true });
+  });
+});
+
+// ==========================================================
+// Typed KNN correctness (#2 dedup blind spot, #4 typed starvation)
+// ==========================================================
+describe('MemoryDatabase - typed KNN correctness', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+  });
+
+  afterEach(() => {
+    cleanup(db, dir);
+  });
+
+  // Unit vector mostly along axis 0, tilted toward `axis` by `tilt`.
+  // cosine distance from the pure axis-0 query ≈ tilt^2/2, so a larger tilt = farther.
+  function tiltVec(axis: number, tilt: number): Float32Array {
+    const v = new Float32Array(EMBEDDING_DIM);
+    v[0] = 1;
+    v[axis] = tilt;
+    const n = Math.hypot(1, tilt);
+    v[0] /= n;
+    v[axis] /= n;
+    return v;
+  }
+  const QUERY = tiltVec(1, 0); // pure axis-0 unit vector
+
+  it('finds a same-type duplicate ranked beyond the global 5 nearest (#2)', () => {
+    // 8 episodics extremely close to the query (global ranks 1..8)...
+    for (let i = 0; i < 8; i++) {
+      db.insertMemory({
+        ...makeMemoryRow({ id: `ep${i}`, type: 'episodic' }),
+        embedding: embeddingToBuffer(tiltVec(i + 2, 0.04)),
+      });
+    }
+    // ...and one semantic near-duplicate farther out (global rank ~9) but well within
+    // EXACT_DUPLICATE distance of the query.
+    db.insertMemory({
+      ...makeMemoryRow({ id: 'sem-dup', type: 'semantic' }),
+      embedding: embeddingToBuffer(tiltVec(100, 0.28)),
+    });
+
+    const found = db.findSimilarMemory(QUERY, THRESHOLDS.EXACT_DUPLICATE, 'semantic');
+    assert.ok(found, 'same-type duplicate found despite 8 nearer other-type rows');
+    assert.equal(found?.id, 'sem-dup');
+    // Sanity: the semantic really is outside the global 5 nearest (so this is a real test).
+    assert.ok((found?.distance ?? 1) < THRESHOLDS.EXACT_DUPLICATE);
+  });
+
+  it('does not starve a typed search when other types dominate the candidates (#4)', () => {
+    // 12 episodics that match the query text and sit nearer in vector space...
+    for (let i = 0; i < 12; i++) {
+      db.insertMemory({
+        ...makeMemoryRow({ id: `e${i}`, type: 'episodic', content: 'query optimization tips and tricks' }),
+        embedding: embeddingToBuffer(tiltVec(i + 2, 0.03)),
+      });
+    }
+    // ...and two relevant semantics, farther in vector space (beyond the candidate cut).
+    db.insertMemory({
+      ...makeMemoryRow({ id: 's1', type: 'semantic', content: 'query optimization design notes' }),
+      embedding: embeddingToBuffer(tiltVec(200, 0.3)),
+    });
+    db.insertMemory({
+      ...makeMemoryRow({ id: 's2', type: 'semantic', content: 'query optimization plan summary' }),
+      embedding: embeddingToBuffer(tiltVec(201, 0.3)),
+    });
+
+    const results = db.hybridSearchMemories('optimization', QUERY, 3, { type: 'semantic' });
+    assert.ok(results.length >= 1, 'typed search returns semantics, not starved by nearer episodics');
+    assert.ok(
+      results.every((r) => r.type === 'semantic'),
+      'every result is the requested type',
+    );
+    const ids = results.map((r) => r.id);
+    assert.ok(ids.includes('s1') && ids.includes('s2'), 'both relevant semantics surfaced');
+  });
+});
+
+// ==========================================================
+// Score fusion monotonicity (#1)
+// ==========================================================
+describe('MemoryDatabase - score fusion', () => {
+  let db: MemoryDatabase;
+  let dir: string;
+
+  beforeEach(() => {
+    ({ db, dir } = makeTempDb());
+  });
+
+  afterEach(() => {
+    cleanup(db, dir);
+  });
+
+  it('fuses signals monotonically: a dual-signal match scores >= each single signal (#1)', () => {
+    const emb = makeEmbedding(7);
+    db.insertMemory({
+      ...makeMemoryRow({ id: 'm', type: 'semantic', content: 'alpha beta gamma delta' }),
+      embedding: embeddingToBuffer(emb),
+    });
+
+    // Same memory, three ways: both signals, FTS only, vector only.
+    const dual = db.hybridSearchMemories('alpha', emb, 10).find((r) => r.id === 'm');
+    const ftsOnly = db.hybridSearchMemories('alpha', null, 10).find((r) => r.id === 'm');
+    const vecOnly = db.hybridSearchMemories('zzzznomatch', emb, 10).find((r) => r.id === 'm');
+
+    assert.ok(dual && ftsOnly && vecOnly, 'memory found by each signal mode');
+    const both = dual!.textScore;
+    // Monotonicity: dual >= each single signal (the old blend violated this).
+    assert.ok(both >= ftsOnly!.textScore - 1e-9, 'dual >= fts-only');
+    assert.ok(both >= vecOnly!.textScore - 1e-9, 'dual >= vec-only');
+    assert.ok(both >= Math.max(ftsOnly!.textScore, vecOnly!.textScore) - 1e-9, 'dual >= max(single signals)');
+    assert.ok(both <= 1 + 1e-9, 'textScore stays in [0,1]');
+  });
+
+  it('keeps an irrelevant memory out of a normal-strictness search (volume sanity)', () => {
+    // One on-topic memory and one clearly unrelated memory with a distant embedding.
+    db.insertMemory({
+      ...makeMemoryRow({ id: 'hit', type: 'semantic', content: 'database indexing strategy' }),
+      embedding: embeddingToBuffer(makeEmbedding(11)),
+    });
+    db.insertMemory({
+      ...makeMemoryRow({ id: 'miss', type: 'semantic', content: 'unrelated cooking recipe' }),
+      embedding: embeddingToBuffer(makeEmbedding(900)),
+    });
+
+    const results = db.hybridSearchMemories('database indexing', null, 10, {
+      topicThreshold: 0.05,
+      relevanceThreshold: 0.1,
+    });
+    const ids = results.map((r) => r.id);
+    assert.ok(ids.includes('hit'), 'on-topic memory returned');
+    assert.ok(!ids.includes('miss'), 'unrelated memory not flooded in by the new fusion');
   });
 });
 
@@ -1049,8 +1306,7 @@ describe('MemoryDatabase - configurable scoring weights', () => {
       {
         textScore: 0.3,
         importance: 0.05,
-        recency: 0.6,
-        access: 0.05,
+        recency: 0.65,
       },
     );
     const ids = recencyHeavy.map((r) => r.id);
@@ -1073,7 +1329,6 @@ describe('MemoryDatabase - configurable scoring weights', () => {
         textScore: 1.0,
         importance: 0,
         recency: 0,
-        access: 0,
       },
     );
     // Both should have the same score (identical textScore, zero everything else)
@@ -1099,7 +1354,6 @@ describe('MemoryDatabase - configurable scoring weights', () => {
         textScore: 0.1,
         importance: 0.1,
         recency: 0.1,
-        access: 0.1,
       },
     );
     assert.ok(unfiltered.length > 0, 'Should find results without relevanceThreshold');
@@ -1110,7 +1364,7 @@ describe('MemoryDatabase - configurable scoring weights', () => {
       null,
       10,
       { topicThreshold: 0, relevanceThreshold: 0.5 },
-      { textScore: 0.1, importance: 0.1, recency: 0.1, access: 0.1 },
+      { textScore: 0.1, importance: 0.1, recency: 0.1 },
     );
     assert.strictEqual(filtered.length, 0, 'Low weights + high relevanceThreshold should filter everything');
     cleanup(db, dir);
@@ -1898,6 +2152,7 @@ function insertSimpleMemory(db: MemoryDatabase, label: string): string {
     access_count: 0,
     last_accessed: null,
     injection_count: 0,
+    superseded_by: null,
   });
   return id;
 }

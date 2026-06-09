@@ -140,4 +140,4 @@ export function warmEmbeddingModel(): void {
   });
 }
 
-export { EMBEDDING_DIM };
+export { EMBEDDING_DIM, MODEL_NAME };

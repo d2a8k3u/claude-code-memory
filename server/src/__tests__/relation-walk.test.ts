@@ -27,6 +27,7 @@ function insert(
     access_count: 0,
     last_accessed: null,
     injection_count: 0,
+    superseded_by: null,
   });
 }
 

@@ -129,3 +129,37 @@ test('insertWithAutoRelations caps relations at 5 — exact cap is enforced', as
     db.close();
   }
 });
+
+test('insertWithAutoRelations supersedes an older same-topic memory on a version bump', async () => {
+  const db = createTestDb();
+  try {
+    // Unit vector at cosine distance `d` from the axis-0 unit vector.
+    const vecAtDistance = (d: number): Float32Array => {
+      const v = new Float32Array(384);
+      v[0] = 1 - d;
+      v[1] = Math.sqrt(1 - (1 - d) * (1 - d));
+      return v;
+    };
+
+    const oldRec = makeMemoryRecord('semantic', 'Feature inventory for the plugin. v0.2.0 production ready.', ['inventory'], {
+      title: 'Claude Memory Plugin - Feature Inventory (v0.2.0)',
+    });
+    oldRec.embedding = embeddingToBuffer(vecAtDistance(0));
+    await insertWithAutoRelations(db, oldRec);
+
+    const newRec = makeMemoryRecord('semantic', 'Feature inventory for the plugin. v1.2.0 production ready.', ['inventory'], {
+      title: 'Claude Memory Plugin - Feature Inventory (v1.2.0)',
+    });
+    // Distance 0.1 from the old one: same topic, not an exact duplicate (>= 0.05).
+    newRec.embedding = embeddingToBuffer(vecAtDistance(0.1));
+    const res = await insertWithAutoRelations(db, newRec);
+
+    assert.equal(res.isNew, true, 'new version inserted, not merged');
+    const oldRow = db.getMemoryByIdRaw(oldRec.id);
+    assert.equal(oldRow?.superseded_by, newRec.id, 'older version superseded by the newer one');
+    const newRow = db.getMemoryByIdRaw(newRec.id);
+    assert.equal(newRow?.superseded_by, null, 'newer version stays active');
+  } finally {
+    db.close();
+  }
+});

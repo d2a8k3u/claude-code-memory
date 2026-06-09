@@ -41,6 +41,8 @@ export function expandByRelations(
 
       const other = db.getMemoryByIdRaw(otherId);
       if (!other) continue;
+      // Superseded (stale) memories are not surfaced as neighbours.
+      if (other.superseded_by != null) continue;
 
       const t = other.type as MemoryType;
       const cap = opts.typeCaps[t];

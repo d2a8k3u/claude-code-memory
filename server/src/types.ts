@@ -32,6 +32,13 @@ export type MemoryRow = {
   access_count: number;
   last_accessed: string | null;
   injection_count: number;
+  /**
+   * Non-null marks this memory as superseded — excluded from search and injection
+   * but kept in the database. Holds either the id of the newer memory that replaced
+   * it, or a `project:<version>` sentinel when demoted by the project-version
+   * staleness pass.
+   */
+  superseded_by: string | null;
 };
 
 export type Relation = {

@@ -15,6 +15,7 @@ import { rowToMemory, type Memory, type MemoryType, type MemoryRow, type Relatio
 import { splitByTopics, insertSplitSections } from './topic-splitter.js';
 import { normalizeTags, buildMergeUpdates, safeParseTags } from './merge-utils.js';
 import { THRESHOLDS, computeInitialRelationWeight } from './thresholds.js';
+import { supersedesByVersion } from './cli/staleness.js';
 
 export { buildMergeUpdates, normalizeTags, safeParseTags, type MergeInput } from './merge-utils.js';
 
@@ -260,6 +261,7 @@ async function memoryStore(db: MemoryDatabase, args: Record<string, unknown>): P
     access_count: 0,
     last_accessed: null,
     injection_count: 0,
+    superseded_by: null,
     embedding: embedding ? embeddingToBuffer(embedding) : null,
   };
 
@@ -292,17 +294,15 @@ async function memorySearch(db: MemoryDatabase, args: Record<string, unknown>): 
   const query = args.query as string;
   const type = args.type as MemoryType | undefined;
   const limit = (args.limit as number) ?? 20;
-  const filter = STRICTNESS_MAP[(args.strictness as string) ?? 'normal'];
+  const baseFilter = STRICTNESS_MAP[(args.strictness as string) ?? 'normal'];
+  const filter = type ? { ...baseFilter, type } : baseFilter;
 
   const queryEmbedding = await generateEmbedding(query);
 
-  // Over-fetch candidates for reranking
-  let scored = db.hybridSearchMemories(query, queryEmbedding, overfetchLimit(limit), filter);
-
-  // Type filter before reranking (don't waste cross-encoder on filtered-out results)
-  if (type) {
-    scored = scored.filter((r) => r.type === type);
-  }
+  // Over-fetch candidates for reranking; the type filter is pushed into both the FTS
+  // query and the vec0 KNN (partition key), so the limit is applied within the type
+  // — no post-hoc `.filter(r => r.type === type)`, which could starve typed results.
+  const scored = db.hybridSearchMemories(query, queryEmbedding, overfetchLimit(limit), filter);
 
   if (scored.length === 0) {
     return text(`No memories found matching "${query}".`);
@@ -533,6 +533,7 @@ async function memoryStoreBatch(db: MemoryDatabase, args: Record<string, unknown
       access_count: 0,
       last_accessed: null,
       injection_count: 0,
+      superseded_by: null,
     });
 
     if (emb) {
@@ -867,6 +868,14 @@ async function computeAndInsertAutoRelations(
     const hourDiff = Math.abs(recordTime - otherTime) / (1000 * 60 * 60);
 
     if (sameType && rel.distance < 0.15) {
+      // Version-bump supersession: a newer same-topic memory whose title carries a
+      // higher version token replaces the older one — demote it (excluded from
+      // search/injection) instead of just recording a `contradicts` relation. This
+      // is what stops an old "Feature Inventory (v0.2.0)" surviving next to a v1.2 one.
+      if (recordTime >= otherTime && supersedesByVersion(record.title ?? '', other.title ?? '')) {
+        db.markSuperseded(other.id, record.id);
+        continue;
+      }
       candidates.push({
         targetId: other.id,
         relationType: 'contradicts',
