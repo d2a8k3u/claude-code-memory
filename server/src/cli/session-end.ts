@@ -72,11 +72,19 @@ export function computeSessionWeight(summary: TranscriptSummary): number {
 }
 
 export function computeSubstanceScore(
-  summary: Pick<TranscriptSummary, 'toolsUsed' | 'filesModified' | 'errorCount' | 'memoryStores' | 'bashCommands'>,
+  summary: Pick<
+    TranscriptSummary,
+    'toolsUsed' | 'filesModified' | 'filesRead' | 'errorCount' | 'memoryStores' | 'bashCommands'
+  >,
 ): number {
   return (
     summary.toolsUsed.length * 2 +
     summary.filesModified.length * 3 +
+    // Credit genuine exploration/learning. `toolsUsed` counts distinct tool NAMES,
+    // so a deep single-tool read session (Read only) scored just 2 and was dropped
+    // even when it read many files and learned a lot. Capped so a huge grep can't
+    // dominate, but enough to clear the threshold.
+    Math.min(summary.filesRead.length, 6) +
     (summary.errorCount > 0 ? 2 : 0) +
     summary.memoryStores +
     Math.min(summary.bashCommands.filter((c) => !isTrivialCommand(c.command)).length, 5)
