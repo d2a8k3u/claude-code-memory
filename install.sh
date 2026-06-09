@@ -267,6 +267,14 @@ cat > "$MEMORY_MD" <<'MEMORY_EOF'
 
 Your project memory is managed by the claude-memory plugin. The plugin's hooks search memory automatically on every user prompt, before risky edits, before running commands, and when it detects recall-style questions. **You do not need to call `memory_search` for routine recall** — the relevant memories arrive as context.
 
+## Act on what surfaces
+
+Injected memories are inputs to the current task, not passive background. When a memory block appears:
+
+- A `[pattern]` / correction memory, or a `⚠️ Prior rule` block before an edit, is a rule the user already established. **Apply it, or state explicitly why it does not apply, before you proceed** — never silently ignore it.
+- A `[procedural]` workflow is the established way to build/test/run here — follow it instead of guessing.
+- `[semantic]` facts and `[episodic]` history are there so you don't re-ask or re-discover what is already known — use them.
+
 **When you still call the MCP tools directly:**
 
 - `memory_store` — when the user explicitly says "remember this", when you disagree with an auto-saved memory, or when you want to save a judgement-level insight (e.g., a project convention you inferred).

@@ -23,6 +23,7 @@ function mk(overrides: Partial<MemoryRow> = {}): MemoryRow {
     access_count: 0,
     last_accessed: null,
     injection_count: 0,
+    superseded_by: null,
     ...overrides,
   };
 }
@@ -45,6 +46,24 @@ test('formatMemoryLine does not star low-importance', () => {
 test('formatMemoryLine shows date for episodic', () => {
   const line = formatMemoryLine(mk({ type: 'episodic', created_at: '2026-04-20T10:00:00Z' }));
   assert.match(line, /\[episodic 2026-04-20\]/);
+});
+
+test('formatMemoryLine renders patterns as an Apply directive', () => {
+  const line = formatMemoryLine(mk({ type: 'pattern' }));
+  assert.match(line, /Apply —/);
+});
+
+test('formatMemoryLine does not truncate a rule mid-sentence', () => {
+  const rule =
+    'Always validate Zod schemas at the boundary and never trust client input; reject with a 400 and a clear message rather than coercing silently, because silent coercion hides bugs downstream.';
+  const line = formatMemoryLine(mk({ type: 'pattern', title: null, content: rule }));
+  assert.ok(line.includes(rule), 'the full rule survives (no mid-rule truncation)');
+  assert.doesNotMatch(line, /…/);
+});
+
+test('formatWarningBlock includes an actionable directive', () => {
+  const block = formatWarningBlock(mk(), 'server/src/memory.ts');
+  assert.match(block, /Apply this rule, or state why it does not apply/);
 });
 
 test('formatBlock wraps lines with auto-recalled header', () => {
