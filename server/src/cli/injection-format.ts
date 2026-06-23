@@ -1,4 +1,5 @@
 import type { MemoryRow } from '../types.js';
+import { PATTERN_FRAMING_ESCALATION_COUNT } from '../thresholds.js';
 
 const HIGH_IMPORTANCE = 0.75;
 
@@ -35,7 +36,13 @@ export function formatMemoryLine(m: MemoryRow, relationType?: string): string {
   // explicit directive and don't truncate mid-rule (generous cap keeps the rule intact).
   if (m.type === 'pattern') {
     const body = title ? `${title}: ${truncate(content, PATTERN_MAX)}` : truncate(content, PATTERN_MAX);
-    return `- ${label} Apply — ${body}`;
+    // A pattern injected past the escalation count keeps resurfacing without sticking:
+    // strengthen the framing once (bounded — a single tier, not unbounded shouting).
+    const directive =
+      m.injection_count > PATTERN_FRAMING_ESCALATION_COUNT
+        ? '⚠️ Repeatedly recalled — apply this or state why it does not apply:'
+        : 'Apply —';
+    return `- ${label} ${directive} ${body}`;
   }
   return `- ${label} ${prefix}${truncate(content, 180)}`;
 }
