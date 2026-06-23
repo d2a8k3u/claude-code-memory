@@ -84,6 +84,24 @@ export const TYPE_RELEVANCE = {
   episodic: 0.25,
 } as const;
 
+// --- Always-on episodic recall for the UserPromptSubmit hook ---
+// Episodic search runs every turn here (not just on recall-style phrasing), so the
+// gate has to reject off-topic-but-recent history. The plain TYPE_RELEVANCE.episodic
+// (0.25) tests the BLENDED finalScore, which a fresh importance-0.5 episodic clears on
+// recency+importance alone (~0.40) with near-zero topical overlap. Two guards prevent
+// that: a higher blended `baseline`, plus a `topicFloor` on the per-component textScore
+// so recency/importance can never carry an off-topic episodic over the line. On an
+// explicit recall-style prompt we relax both toward the old behavior so "did we already…"
+// surfaces at least as much history as before.
+export const EPISODIC_PROMPT_SUBMIT = {
+  /** Off-recall: blended finalScore floor (above the ~0.40 a recent off-topic episodic reaches). */
+  baseline: 0.45,
+  /** Off-recall: minimum topical textScore (FTS+vector overlap) required to inject. */
+  topicFloor: 0.12,
+  /** Recall-style prompt: relax the blended floor back toward TYPE_RELEVANCE.episodic. */
+  recallRelaxed: TYPE_RELEVANCE.episodic,
+} as const;
+
 // --- Per-hook caps by memory type ---
 export const TYPE_LIMITS_PER_HOOK = {
   userPromptSubmit: {
@@ -114,6 +132,23 @@ export const TYPE_DECAY = {
   procedural: { perSession: 0.02, ageOutDays: Infinity, staleImpThreshold: 0 },
   pattern: { perSession: 0.01, ageOutDays: 180, staleImpThreshold: 0.05 },
 } as const;
+
+// --- Co-occurrence reinforcement ---
+// Conservative importance bump for a memory that was injected this session AND whose
+// distinctive (non-path, non-command) title tokens reappear in the assistant reply.
+// Reappearance is weak evidence the memory was relevant to the work — never proof it
+// was "used" — so the delta is small, well below a single decay step, and capped by the
+// 1.0 ceiling in boostImportance. File-path and command tokens are excluded because
+// they co-occur by construction (the reply discusses the same files) and carry no signal.
+export const REINFORCE_ON_COOCCURRENCE = 0.03;
+
+// --- Directive framing escalation ---
+// A pattern injected more than this many times without the rule sticking is a
+// non-traction signal: escalate its prefix once (single bounded tier, not unbounded
+// shouting) to a stronger "repeatedly recalled" framing. Based purely on the existing
+// injection_count field — being injected often is weak evidence the rule is being
+// ignored, never proof it was "used", so we cap the escalation at one tier.
+export const PATTERN_FRAMING_ESCALATION_COUNT = 5;
 
 // --- Importance boosts per type ---
 export const TYPE_BOOST_ON_INJECT = {

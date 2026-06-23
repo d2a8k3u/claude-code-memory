@@ -2,15 +2,18 @@ import type { MemoryDatabase } from '../database.js';
 import type { HookInput, HookOutput } from './types.js';
 import type { MemoryRow, MemoryType } from '../types.js';
 import { generateEmbedding } from '../embeddings.js';
-import { TYPE_LIMITS_PER_HOOK, TYPE_RELEVANCE } from '../thresholds.js';
+import { EPISODIC_PROMPT_SUBMIT, TYPE_LIMITS_PER_HOOK, TYPE_RELEVANCE } from '../thresholds.js';
 import { formatBlockWithRelations } from './injection-format.js';
 import { expandByRelations } from './relation-walk.js';
-import { dedupSet, markInjected } from './session-cache.js';
+import { dedupSet, markInjected, writeStatusline } from './session-cache.js';
 import { isRecallStyle } from './recall-detector.js';
+import { getRecallMode } from './recall-mode.js';
 
 const MIN_PROMPT_LEN = 8;
 
 export async function handlePromptSubmit(db: MemoryDatabase, input: HookInput): Promise<HookOutput> {
+  if (getRecallMode(db) === 'off') return empty();
+
   const cwd = input.cwd ?? process.cwd();
   const prompt = (input.prompt ?? '').trim();
 
@@ -39,16 +42,18 @@ export async function handlePromptSubmit(db: MemoryDatabase, input: HookInput): 
       .filter((r) => !cache.has(r.id))
       .slice(0, caps.pattern);
 
-    let episodic: MemoryRow[] = [];
-    if (isRecallStyle(prompt)) {
-      episodic = db
-        .hybridSearchMemories(prompt, embedding, caps.episodic * 2, {
-          relevanceThreshold: TYPE_RELEVANCE.episodic,
-          type: 'episodic',
-        })
-        .filter((r) => !cache.has(r.id))
-        .slice(0, caps.episodic);
-    }
+    // Episodic recall runs every turn (precedent: pre-tool-use handleReadScan). The
+    // gate is topically tightened off-recall so recent-but-off-topic history can't leak
+    // in; on a recall-style prompt we relax toward the old, looser threshold instead.
+    const recall = isRecallStyle(prompt);
+    const episodic = db
+      .hybridSearchMemories(prompt, embedding, caps.episodic * 2, {
+        relevanceThreshold: recall ? EPISODIC_PROMPT_SUBMIT.recallRelaxed : EPISODIC_PROMPT_SUBMIT.baseline,
+        topicThreshold: recall ? undefined : EPISODIC_PROMPT_SUBMIT.topicFloor,
+        type: 'episodic',
+      })
+      .filter((r) => !cache.has(r.id))
+      .slice(0, caps.episodic);
 
     const primaries: MemoryRow[] = [...semantic, ...pattern, ...episodic].slice(0, caps.total);
     if (primaries.length === 0) return empty();
@@ -71,6 +76,7 @@ export async function handlePromptSubmit(db: MemoryDatabase, input: HookInput): 
     const allIds = [...primaryIds, ...neighbours.map((n) => n.memory.id)];
     db.incrementInjectionCount(allIds);
     markInjected(cwd, allIds);
+    writeStatusline(cwd, dedupSet(cwd).size, db.countMemories());
 
     const block = formatBlockWithRelations(primaries, neighbours, { sessionNum: currentSessionNum(db) });
     return {

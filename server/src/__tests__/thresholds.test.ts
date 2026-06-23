@@ -6,6 +6,7 @@ import {
   TYPE_DECAY,
   TYPE_BOOST_ON_INJECT,
   TYPE_BOOST_ON_ACCESS,
+  EPISODIC_PROMPT_SUBMIT,
   RELATION_WEIGHT,
   computeInitialRelationWeight,
 } from '../thresholds.js';
@@ -15,6 +16,14 @@ test('TYPE_RELEVANCE has a threshold for each non-working type', () => {
   assert.equal(TYPE_RELEVANCE.pattern, 0.4);
   assert.equal(TYPE_RELEVANCE.procedural, 0.4);
   assert.equal(TYPE_RELEVANCE.episodic, 0.25);
+});
+
+test('EPISODIC_PROMPT_SUBMIT baseline exceeds the recall-relaxed floor', () => {
+  // Off-recall must be stricter than recall-style, and the recall floor must stay at
+  // the legacy episodic threshold so "did we already…" recalls at least as much as before.
+  assert.ok(EPISODIC_PROMPT_SUBMIT.baseline > EPISODIC_PROMPT_SUBMIT.recallRelaxed);
+  assert.equal(EPISODIC_PROMPT_SUBMIT.recallRelaxed, TYPE_RELEVANCE.episodic);
+  assert.ok(EPISODIC_PROMPT_SUBMIT.topicFloor > 0);
 });
 
 test('TYPE_LIMITS_PER_HOOK caps UserPromptSubmit at 6 total', () => {
