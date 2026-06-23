@@ -5,8 +5,11 @@ import { TYPE_LIMITS_PER_HOOK, TYPE_RELEVANCE } from '../thresholds.js';
 import { formatBlockWithRelations, formatWarningBlock } from './injection-format.js';
 import { dedupSet, markInjected } from './session-cache.js';
 import { classifyCommand } from './transcript.js';
+import { getRecallMode } from './recall-mode.js';
 
 export async function handlePreToolUse(db: MemoryDatabase, input: HookInput): Promise<HookOutput> {
+  if (getRecallMode(db) === 'off') return empty();
+
   const cwd = input.cwd ?? process.cwd();
   const tool = input.tool_name ?? '';
   const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
