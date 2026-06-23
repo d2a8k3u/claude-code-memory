@@ -9,6 +9,7 @@ import { insertWithAutoRelations } from '../memory.js';
 import { detectAndStorePatterns } from './pattern-detector.js';
 import { extractAll } from './turn-extractor.js';
 import { dedupSet } from './session-cache.js';
+import { REINFORCE_ON_COOCCURRENCE } from '../thresholds.js';
 
 export { deduplicateTaskDescriptions, extractTaskFromEpisodic } from './pattern-detector.js';
 
@@ -91,6 +92,88 @@ export function computeSubstanceScore(
   );
 }
 
+// Generic words a title shares with arbitrary prose — matching on these would boost
+// almost every injected memory regardless of relevance, so they carry no signal.
+const REINFORCE_STOPWORDS = new Set([
+  'session',
+  'workflow',
+  'module',
+  'modules',
+  'file',
+  'files',
+  'code',
+  'with',
+  'from',
+  'this',
+  'that',
+  'into',
+  'used',
+  'using',
+  'active',
+  'stack',
+  'error',
+  'errors',
+  'test',
+  'tests',
+]);
+
+function tokenizeWords(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((t) => t.length >= 4);
+}
+
+/**
+ * Tokens that co-occur with an injected memory by construction — this session's file
+ * paths and command words. A title token matching one of these is no evidence the
+ * memory was relevant (the reply naturally repeats the files/commands being worked on),
+ * so they are excluded before scoring.
+ */
+function sessionContextTokens(summary: TranscriptSummary): Set<string> {
+  const tokens = new Set<string>();
+  for (const f of summary.filesModified) for (const t of tokenizeWords(f)) tokens.add(t);
+  for (const f of summary.filesRead) for (const t of tokenizeWords(f)) tokens.add(t);
+  for (const c of summary.bashCommands) for (const t of tokenizeWords(c.command)) tokens.add(t);
+  return tokens;
+}
+
+/** Distinctive title tokens: long-enough words that aren't stopwords or session-context tokens. */
+export function distinctiveTitleTokens(title: string, contextTokens: Set<string>): string[] {
+  const seen = new Set<string>();
+  for (const t of tokenizeWords(title)) {
+    if (REINFORCE_STOPWORDS.has(t) || contextTokens.has(t)) continue;
+    seen.add(t);
+  }
+  return [...seen];
+}
+
+/**
+ * Conservative co-occurrence reinforcement: among memories injected this session, boost
+ * those whose distinctive (non-path, non-command) title tokens reappear in the assistant
+ * reply. Reappearance is weak evidence of relevance, never proof of use — hence the small
+ * delta and the strict token filtering. Returns the IDs that were reinforced.
+ */
+export function reinforceCooccurringMemories(
+  db: MemoryDatabase,
+  injectedIds: Iterable<string>,
+  assistantReply: string,
+  summary: TranscriptSummary,
+): string[] {
+  const reply = assistantReply.toLowerCase();
+  if (!reply.trim()) return [];
+  const replyTokens = new Set(tokenizeWords(reply));
+  const contextTokens = sessionContextTokens(summary);
+  const reinforced: string[] = [];
+
+  for (const id of injectedIds) {
+    const mem = db.getMemoryByIdRaw(id);
+    if (!mem?.title) continue;
+    const distinctive = distinctiveTitleTokens(mem.title, contextTokens);
+    if (distinctive.some((t) => replyTokens.has(t))) {
+      if (db.boostImportance(id, REINFORCE_ON_COOCCURRENCE)) reinforced.push(id);
+    }
+  }
+  return reinforced;
+}
+
 export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Promise<HookOutput> {
   const cwd = input.cwd ?? process.cwd();
   const summary = parseTranscript(input.transcript_path ?? '', cwd);
@@ -114,6 +197,19 @@ export async function handleSessionEnd(db: MemoryDatabase, input: HookInput): Pr
     }
   } catch {
     // swallow
+  }
+
+  // Co-occurrence reinforcement: bump injected memories whose distinctive title tokens
+  // resurfaced in the assistant reply (weak relevance signal, never proof of use).
+  try {
+    reinforceCooccurringMemories(
+      db,
+      dedupSet(cwd),
+      extractLastAssistantMessage(input.transcript_path ?? ''),
+      summary,
+    );
+  } catch {
+    // swallow — reinforcement is best-effort
   }
 
   const episodicRecords: (MemoryRow & { embedding?: Buffer | null })[] = [];
