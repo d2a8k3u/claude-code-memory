@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-04-25
+## [1.2.0] - 2026-06-23
 
 ### Added
 
@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`cli cleanup --rewrite-titles`** — idempotent migration command that rewrites legacy `**Task:**`-prefix episodics into prose titles + content.
 - **Extended `memory_health`** — new Relation Graph section with link density, isolated nodes, avg relation weight, strong-relation share, and last sweep session.
 - `relation_coactivations` sidecar table (additive schema change; no migration needed for existing installs).
+- **`/memory-recall` slash command** — per-project kill-switch that pauses or resumes automatic recall while leaving storing active. Writes a per-project flag the hooks honour; injection is skipped while recall is off.
+- **`/memory-status` slash command** — on-demand memory health digest (item counts, sessions, injections served), sharing a single `health-report` module with the `memory_health` tool.
+- **Statusline badge** — optional `statusLine` rendering `🧠 <injected> loaded / <corpus>`. `install.sh` sets it only when no statusline is already configured (never clobbers an existing one). The reader keys off a precomputed flat file (`.claude/memory-db/.statusline`), so it never opens the database.
+- **Schema migrations + stale-fact suppression** — additive migration runner replaces the single-schema assumption; semantic facts that are superseded/contradicted are suppressed from recall instead of surfacing next to their replacement.
+- **Importance reinforcement via reply co-occurrence** — a memory injected and then echoed in the user's next reply gains importance, so genuinely-used memories rise over unused ones.
+- **Escalated framing for repeatedly-recalled patterns** — a pattern surfaced across many sessions is reframed as a stronger "apply this or state why it does not apply" directive rather than being silently re-shown.
 
 ### Changed
 
@@ -37,12 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP `memory_store`** now routes through `insertWithAutoRelations`, ensuring consistent dedup, relation-creation, and content quality across every write path.
 - **Consolidation moves from a 10-session batch to continuous event-triggered subroutines** — dedup on insert, pattern promotion on Stop, decay per SessionStart.
 - Per-type decay replaces the flat `decayImportance(30, 0.05)` call.
+- **Recalled patterns render as actionable directives** — pattern/correction memories are shown as an `Apply —` directive and no longer truncated mid-rule; the pre-edit warning block now demands the rule be applied or explicitly dismissed before continuing. `CLAUDE_MEMORY.md` (written by `install.sh`) gains an "Act on what surfaces" section.
+- **Episodic recall is always-on but topically gated** — every prompt runs a type-scoped episodic search gated by topical relevance, instead of only recall-style prompts.
+- **`SessionStart` treats compaction and resume as continuation** — `source = compact|resume` is handled as an ongoing session rather than re-injecting a full cold-start payload.
+- **`error-context` uses hybrid retrieval with FTS fallback** — semantic + full-text search with graceful degradation when embeddings are unavailable.
+- **Reduced auto-save and recall noise** — tighter thresholds and filtering cut low-value episodic writes and redundant injections.
+- **Refactored `CLAUDE.md` / memory-files setup** in `install.sh` for cleaner install and update handling.
 
 ### Removed
 
 - The "you MUST call memory_search" behavioural reminder block at SessionStart.
 - Meta-prefix formatting (`**Task:**` etc.) from auto-saved episodic content.
 - Fixed 25-item `SessionStart` cap.
+
+### Fixed
+
+- **Hook template aligned with the installed five-hook set** — the reference template defined only 3 events (`SessionStart`, `PostToolUse`, `Stop`) with an object-form matcher, while `install.sh` installs 5 (adding `UserPromptSubmit` and `PreToolUse`) with a string matcher. Loading from the stale template silently dropped the prompt-submit and pre-tool-use hooks; the template now matches the 5 events and the `"Bash"` string matcher.
 
 ## [1.1.0] - 2026-03-15
 
