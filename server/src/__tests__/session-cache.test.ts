@@ -10,6 +10,9 @@ import {
   isInjected,
   deleteCache,
   CACHE_CAP,
+  formatBadge,
+  writeStatusline,
+  readBadge,
 } from '../cli/session-cache.js';
 
 function tempCwd(): string {
@@ -88,6 +91,42 @@ test('loadCache tolerates corrupt file', () => {
     writeFileSync(join(cwd, '.claude', 'memory-db', 'session-cache.json'), '{corrupt');
     const cache = loadCache(cwd);
     assert.deepEqual(cache.injected_ids, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('formatBadge labels loaded over corpus; empty corpus reads as zero', () => {
+  assert.equal(formatBadge(4, 120), '🧠 4 loaded / 120');
+  assert.equal(formatBadge(0, 0), '🧠 0 loaded');
+  assert.equal(formatBadge(7, 0), '🧠 0 loaded');
+});
+
+test('readBadge returns default when flat file missing', () => {
+  const cwd = tempCwd();
+  try {
+    assert.equal(readBadge(cwd), '🧠 0 loaded');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('writeStatusline then readBadge round-trips the badge', () => {
+  const cwd = tempCwd();
+  try {
+    writeStatusline(cwd, 4, 120);
+    assert.equal(readBadge(cwd), '🧠 4 loaded / 120');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('readBadge tolerates a corrupt flat file', () => {
+  const cwd = tempCwd();
+  try {
+    mkdirSync(join(cwd, '.claude', 'memory-db'), { recursive: true });
+    writeFileSync(join(cwd, '.claude', 'memory-db', '.statusline'), 'garbage');
+    assert.equal(readBadge(cwd), '🧠 0 loaded');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
