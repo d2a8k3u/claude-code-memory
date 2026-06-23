@@ -1,5 +1,9 @@
 import type { MemoryDatabase } from '../database.js';
 import type { HookInput, HookOutput } from './types.js';
+import { generateEmbedding } from '../embeddings.js';
+import { TYPE_RELEVANCE } from '../thresholds.js';
+import { markInjected } from './session-cache.js';
+import { getRecallMode } from './recall-mode.js';
 
 const ERROR_PATTERNS = [
   /\bError:\s/,
@@ -23,7 +27,13 @@ const ERROR_PATTERNS = [
   /\bcannot find module\b/i,
 ];
 
-export function handleErrorContext(db: MemoryDatabase, input: HookInput): HookOutput | null {
+export async function handleErrorContext(
+  db: MemoryDatabase,
+  input: HookInput,
+  // Injectable so tests can drive semantic recall deterministically without the model.
+  embed: (text: string) => Promise<Float32Array | null> = generateEmbedding,
+): Promise<HookOutput | null> {
+  if (getRecallMode(db) === 'off') return null;
   if (input.tool_name !== 'Bash') return null;
 
   const output = input.tool_output ?? '';
@@ -68,7 +78,10 @@ export function handleErrorContext(db: MemoryDatabase, input: HookInput): HookOu
   if (searchTerms.size === 0) return null;
 
   const query = [...searchTerms].slice(0, 5).join(' ');
-  const results = db.searchMemories(query, 5);
+  // hybridSearchMemories degrades to FTS when the embedding is null, and
+  // generateEmbedding returns null on failure — so the fail-safe is implicit.
+  const emb = await embed(query);
+  const results = db.hybridSearchMemories(query, emb, 5, { relevanceThreshold: TYPE_RELEVANCE.episodic });
 
   if (results.length === 0) return null;
 
@@ -78,6 +91,8 @@ export function handleErrorContext(db: MemoryDatabase, input: HookInput): HookOu
       return `- [${m.type}] ${titlePart}${m.content}`;
     })
     .join('\n');
+
+  markInjected(input.cwd ?? process.cwd(), results.map((m) => m.id));
 
   return {
     hookSpecificOutput: {
