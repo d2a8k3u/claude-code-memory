@@ -16,7 +16,9 @@ import {
   SEMANTIC_SINGLETON_CAP,
   deduplicateTaskDescriptions,
   deriveEpisodicTitle,
+  distinctiveTitleTokens,
 } from '../cli/session-end.js';
+import { REINFORCE_ON_COOCCURRENCE } from '../thresholds.js';
 import { makeTempDb, cleanup } from './helpers.js';
 
 function writeTranscript(dir: string, lines: object[]): string {
@@ -1206,6 +1208,77 @@ describe('handleSessionEnd - turn-extractor integration', () => {
       await handleSessionEnd(db, { cwd: dir, transcript_path: writeTranscript(dir, []) });
       // After one session-end, count should be >= 1
       assert.ok(db.getCoActivationCount('COACT_A', 'COACT_B') >= 1);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('distinctiveTitleTokens', () => {
+  it('drops stopwords and session-context tokens, keeps distinctive ones', () => {
+    const ctx = new Set(['payments', 'index']);
+    // "modules" is a stopword, "payments"/"index" are context tokens, "in" is too short.
+    const tokens = distinctiveTitleTokens('Active modules in payments authentication index', ctx);
+    assert.deepEqual(tokens, ['authentication']);
+  });
+});
+
+describe('handleSessionEnd - co-occurrence reinforcement', () => {
+  it('boosts an injected memory whose distinctive title token reappears in the reply, but not path/command-only or absent ones', async () => {
+    const { db, dir } = makeTempDb();
+    try {
+      const { resetCache, markInjected } = await import('../cli/session-cache.js');
+      const now = new Date().toISOString();
+      const seed = (id: string, title: string) =>
+        db.insertMemory({
+          id, type: 'semantic', title, content: 'x', context: null, source: null,
+          tags: '[]', importance: 0.5, created_at: now, updated_at: now,
+          access_count: 0, last_accessed: null, injection_count: 0, superseded_by: null,
+        });
+      // HIT: "authentication" appears in the reply and is not a file/command token.
+      seed('BOOST_HIT', 'Authentication refactor decision');
+      // ABSENT: distinctive token "kubernetes" never appears in the reply.
+      seed('BOOST_MISS', 'Kubernetes deployment topology');
+      // PATH-ONLY: its only distinctive token is "payments", which is a touched-file
+      // token — co-occurs by construction, must NOT count even though it is in the reply.
+      seed('BOOST_PATHONLY', 'payments rollout');
+
+      resetCache(dir, '1');
+      markInjected(dir, ['BOOST_HIT', 'BOOST_MISS', 'BOOST_PATHONLY']);
+
+      const transcriptPath = writeTranscript(dir, [
+        { type: 'user', message: { role: 'user', content: 'Wire up auth and payments' } },
+        {
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'tool_use', name: 'Edit', input: { file_path: 'src/payments.ts' } },
+              { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } },
+            ],
+          },
+        },
+        {
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Reworked the authentication flow and the payments handler.' }],
+          },
+        },
+      ]);
+
+      await handleSessionEnd(db, { cwd: dir, transcript_path: transcriptPath });
+
+      const hit = db.getMemoryByIdRaw('BOOST_HIT');
+      const miss = db.getMemoryByIdRaw('BOOST_MISS');
+      const pathOnly = db.getMemoryByIdRaw('BOOST_PATHONLY');
+      assert.ok(hit && miss && pathOnly);
+      assert.ok(
+        Math.abs(hit.importance - (0.5 + REINFORCE_ON_COOCCURRENCE)) < 1e-9,
+        `HIT should be boosted, got ${hit.importance}`,
+      );
+      assert.equal(miss.importance, 0.5, 'absent token must not boost');
+      assert.equal(pathOnly.importance, 0.5, 'file/command-only token must not boost');
     } finally {
       db.close();
     }

@@ -1587,6 +1587,42 @@ describe('MemoryDatabase - importance decay', () => {
   });
 });
 
+describe('MemoryDatabase - boostImportance', () => {
+  it('raises importance by the delta and touches updated_at', () => {
+    const { db, dir } = makeTempDb();
+    const old = new Date(Date.now() - 1000).toISOString();
+    db.insertMemory(makeMemoryRow({ id: 'b1', importance: 0.5, created_at: old, updated_at: old }));
+
+    assert.equal(db.boostImportance('b1', 0.2), true);
+
+    const row = db.getMemoryByIdRaw('b1');
+    assert.ok(row);
+    assert.ok(Math.abs(row.importance - 0.7) < 1e-9, `expected 0.7, got ${row.importance}`);
+    assert.ok(row.updated_at > old, 'updated_at should advance');
+
+    cleanup(db, dir);
+  });
+
+  it('clamps importance at 1.0', () => {
+    const { db, dir } = makeTempDb();
+    db.insertMemory(makeMemoryRow({ id: 'b2', importance: 0.95 }));
+
+    db.boostImportance('b2', 0.2);
+
+    const row = db.getMemoryByIdRaw('b2');
+    assert.ok(row);
+    assert.equal(row.importance, 1.0);
+
+    cleanup(db, dir);
+  });
+
+  it('no-ops on a missing id', () => {
+    const { db, dir } = makeTempDb();
+    assert.equal(db.boostImportance('nope', 0.2), false);
+    cleanup(db, dir);
+  });
+});
+
 // ==========================================================
 // Meta Table
 // ==========================================================
