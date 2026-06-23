@@ -80,6 +80,12 @@ if [ -f "$SETTINGS_FILE" ]; then
       );
     }
 
+    // Remove statusline only if it is ours (leave a user's own statusline alone)
+    if (settings.statusLine && typeof settings.statusLine.command === 'string'
+        && settings.statusLine.command.includes('claude-memory/server/dist/cli.js statusline')) {
+      delete settings.statusLine;
+    }
+
     // Remove hooks
     if (settings.hooks) {
       for (const event of Object.keys(settings.hooks)) {

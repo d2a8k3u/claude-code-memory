@@ -171,6 +171,15 @@ settings.permissions.allow = settings.permissions.allow.filter(
   p => !p.startsWith('mcp__plugin_claude-memory')
 );
 
+// Statusline — single settings object, like permissions. Only set it when the user
+// has NONE configured; never clobber an existing statusline.
+if (!settings.statusLine) {
+  settings.statusLine = {
+    type: 'command',
+    command: 'node ' + pluginDir + '/server/dist/cli.js statusline',
+  };
+}
+
 // Hooks
 const hooks = {
   SessionStart: [
