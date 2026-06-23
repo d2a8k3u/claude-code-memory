@@ -261,6 +261,54 @@ describe('handleSessionStart — multi-query context search', { timeout: 30_000 
     cleanup(db, dir);
   });
 
+  it('compaction source preserves session state and re-injects pattern rules', async () => {
+    db.setSessionMeta('session_count', '7');
+    seedMemory(db, 'working-1', { type: 'working', content: 'in-flight scratchpad' }, 1);
+    seedMemory(
+      db,
+      'pat-1',
+      { type: 'pattern', title: 'Error Handling Pattern', content: 'Always use Result types', importance: 0.8 },
+      2,
+    );
+
+    const result = await handleSessionStart(db, { cwd: '/a/bb', source: 'compact' });
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
+
+    // (a) working memory survives a compaction continuation
+    assert.ok(db.getMemoryByIdRaw('working-1'), 'working memory must survive compaction');
+
+    // (b) session_count is not bumped — this is a continuation, not a new session
+    assert.equal(db.getSessionMeta('session_count'), '7');
+    assert.ok(ctx.includes('session #7'));
+
+    // (c) pattern importance is unchanged (no decay on compaction)
+    assert.equal(db.getMemoryByIdRaw('pat-1')?.importance, 0.8);
+
+    // (d) the block carries the compaction header and at least one directive pattern line
+    assert.ok(ctx.includes('Context was compacted — these prior rules still apply:'));
+    assert.ok(/^- \[pattern.*\] Apply — /m.test(ctx), 'expected at least one "Apply —" pattern line');
+
+    cleanup(db, dir);
+  });
+
+  it('absent source behaves like a normal startup (regression)', async () => {
+    db.setSessionMeta('session_count', '7');
+    seedMemory(db, 'working-1', { type: 'working', content: 'in-flight scratchpad' }, 1);
+
+    const result = await handleSessionStart(db, { cwd: '/a/bb' });
+    assert.ok(result.hookSpecificOutput);
+    const ctx = result.hookSpecificOutput.additionalContext;
+
+    // Normal startup: working wiped, session_count bumped, no compaction header.
+    assert.equal(db.getMemoryByIdRaw('working-1'), null, 'working memory must be cleared on normal startup');
+    assert.equal(db.getSessionMeta('session_count'), '8');
+    assert.ok(ctx.includes('session #8'));
+    assert.ok(!ctx.includes('Context was compacted'));
+
+    cleanup(db, dir);
+  });
+
   it('session-start output is compact and has no behavioural reminder', async () => {
     const { db: testDb, dir: testDir } = makeTempDb();
     try {
