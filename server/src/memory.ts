@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
-import { statSync } from 'node:fs';
 import type { MemoryDatabase, RelevanceFilterOptions } from './database.js';
+import { buildHealthReport } from './cli/health-report.js';
 import {
   generateEmbedding,
   generateEmbeddings,
@@ -652,66 +652,8 @@ function memoryGraphViz(): ToolResult {
 
 async function memoryHealth(db: MemoryDatabase): Promise<ToolResult> {
   const stats = db.getHealthStats();
-  const embAvailable = await isEmbeddingsAvailable();
-  const rerankerAvailable = await isRerankerAvailable();
-
-  let fileSize = 'unknown';
-  try {
-    const st = statSync(db.path);
-    const mb = (st.size / (1024 * 1024)).toFixed(2);
-    fileSize = `${mb} MB`;
-  } catch {
-    // DB path may not be accessible
-  }
-
-  const typeLines = Object.entries(stats.byType)
-    .map(([type, count]) => `  - ${type}: ${count}`)
-    .join('\n');
-
-  const report = `# Memory Health Report
-
-**Database:** ${fileSize}
-**Embeddings model:** ${embAvailable ? 'available' : 'unavailable'}
-**Reranker model:** ${rerankerAvailable ? 'available' : 'unavailable'}
-
-## Counts
-- **Total:** ${stats.total}
-${typeLines}
-
-## Embedding Coverage
-- **With embedding:** ${stats.withEmbedding}
-- **Without embedding:** ${stats.withoutEmbedding}
-- **Coverage:** ${stats.total > 0 ? ((stats.withEmbedding / stats.total) * 100).toFixed(1) : '0'}%
-
-## Staleness
-- **Stale memories** (importance < 0.2, access < 2, older than 30d): ${stats.staleCount}
-
-## Age Distribution
-- Last 24h: ${stats.ageDistribution.last24h}
-- Last 7d: ${stats.ageDistribution.last7d}
-- Last 30d: ${stats.ageDistribution.last30d}
-- Older: ${stats.ageDistribution.older}
-
-## Session Info
-- **Session count:** ${stats.sessionCount}
-- **Last consolidation:** session #${stats.lastConsolidation}
-- **Sessions since consolidation:** ${stats.sessionCount - stats.lastConsolidation}
-
-## Quality Metrics
-- **Accessed ratio:** ${stats.total > 0 ? (stats.qualityMetrics.accessedRatio * 100).toFixed(1) : '0'}% (${Math.round(stats.qualityMetrics.accessedRatio * stats.total)}/${stats.total})
-- **Avg importance:** ${stats.qualityMetrics.avgImportance.toFixed(2)}
-- **Importance distribution:** low(<0.3): ${stats.qualityMetrics.importanceDistribution.low ?? 0} | mid: ${stats.qualityMetrics.importanceDistribution.medium ?? 0} | high(>=0.7): ${stats.qualityMetrics.importanceDistribution.high ?? 0}
-- **Injections:** ${stats.qualityMetrics.injectionStats.totalInjections} total, avg ${stats.qualityMetrics.injectionStats.avgInjectionCount.toFixed(1)}/memory, max ${stats.qualityMetrics.injectionStats.topInjected}
-- **Never injected (>7d):** ${stats.qualityMetrics.injectionStats.neverInjected} memories
-
-## Relation Graph
-- **Relations:** ${stats.relationStats.relCount}
-- **Link density:** ${stats.relationStats.linkDensity.toFixed(2)} per memory
-- **Isolated nodes:** ${stats.relationStats.isolated}
-- **Avg relation weight:** ${stats.relationStats.avgRelWeight.toFixed(2)}
-- **Strong relation share (w >= 0.5):** ${(stats.relationStats.strongRelShare * 100).toFixed(1)}%
-- **Last sweep:** session #${stats.relationStats.lastSweep}`;
-
+  const [embAvailable, rerankerAvailable] = await Promise.all([isEmbeddingsAvailable(), isRerankerAvailable()]);
+  const report = await buildHealthReport(stats, db.path, { embAvailable, rerankerAvailable });
   return text(report);
 }
 

@@ -9,6 +9,36 @@ import type { ScoringWeights } from './thresholds.js';
 
 type Migration = { version: number; up: (db: Database.Database) => void };
 
+export type HealthStats = {
+  total: number;
+  byType: Record<string, number>;
+  withEmbedding: number;
+  withoutEmbedding: number;
+  staleCount: number;
+  ageDistribution: { last24h: number; last7d: number; last30d: number; older: number };
+  sessionCount: number;
+  lastConsolidation: number;
+  qualityMetrics: {
+    accessedRatio: number;
+    avgImportance: number;
+    importanceDistribution: { low: number; medium: number; high: number };
+    injectionStats: {
+      totalInjections: number;
+      neverInjected: number;
+      avgInjectionCount: number;
+      topInjected: number;
+    };
+  };
+  relationStats: {
+    relCount: number;
+    linkDensity: number;
+    isolated: number;
+    avgRelWeight: number;
+    strongRelShare: number;
+    lastSweep: number;
+  };
+};
+
 /** Adds a column if it is not already present (idempotent). */
 function addColumnIfMissing(db: Database.Database, table: string, column: string, definition: string): void {
   const columns = db.pragma(`table_info(${table})`) as { name: string }[];
@@ -991,6 +1021,14 @@ export class MemoryDatabase {
     return r1.changes + r2.changes + r3.changes;
   }
 
+  /** Reinforce a single memory's importance, clamped at 1.0. Counterpart to the decay passes. */
+  boostImportance(id: string, delta: number): boolean {
+    const res = this.db
+      .prepare('UPDATE memories SET importance = MIN(1.0, importance + ?), updated_at = ? WHERE id = ?')
+      .run(delta, new Date().toISOString(), id);
+    return res.changes > 0;
+  }
+
   findRelatedMemories(embedding: Float32Array, limit = 5): { id: string; distance: number }[] {
     const rows = this.db
       .prepare(
@@ -1236,35 +1274,7 @@ export class MemoryDatabase {
 
   // --- Health & Curation ---
 
-  getHealthStats(): {
-    total: number;
-    byType: Record<string, number>;
-    withEmbedding: number;
-    withoutEmbedding: number;
-    staleCount: number;
-    ageDistribution: { last24h: number; last7d: number; last30d: number; older: number };
-    sessionCount: number;
-    lastConsolidation: number;
-    qualityMetrics: {
-      accessedRatio: number;
-      avgImportance: number;
-      importanceDistribution: { low: number; medium: number; high: number };
-      injectionStats: {
-        totalInjections: number;
-        neverInjected: number;
-        avgInjectionCount: number;
-        topInjected: number;
-      };
-    };
-    relationStats: {
-      relCount: number;
-      linkDensity: number;
-      isolated: number;
-      avgRelWeight: number;
-      strongRelShare: number;
-      lastSweep: number;
-    };
-  } {
+  getHealthStats(): HealthStats {
     const total = this.countMemories();
 
     const typeRows = this.db.prepare('SELECT type, COUNT(*) as count FROM memories GROUP BY type').all() as {
