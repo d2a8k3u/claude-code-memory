@@ -7,6 +7,7 @@ import {
   formatBlockWithRelations,
 } from '../cli/injection-format.js';
 import type { MemoryRow } from '../types.js';
+import { PATTERN_FRAMING_ESCALATION_COUNT } from '../thresholds.js';
 
 function mk(overrides: Partial<MemoryRow> = {}): MemoryRow {
   return {
@@ -59,6 +60,26 @@ test('formatMemoryLine does not truncate a rule mid-sentence', () => {
   const line = formatMemoryLine(mk({ type: 'pattern', title: null, content: rule }));
   assert.ok(line.includes(rule), 'the full rule survives (no mid-rule truncation)');
   assert.doesNotMatch(line, /…/);
+});
+
+test('formatMemoryLine escalates framing for a repeatedly-injected pattern', () => {
+  const line = formatMemoryLine(mk({ type: 'pattern', injection_count: PATTERN_FRAMING_ESCALATION_COUNT + 1 }));
+  assert.match(line, /Repeatedly recalled — apply this or state why it does not apply:/);
+  assert.doesNotMatch(line, /Apply —/);
+});
+
+test('formatMemoryLine keeps normal framing at or below the escalation threshold', () => {
+  const line = formatMemoryLine(mk({ type: 'pattern', injection_count: PATTERN_FRAMING_ESCALATION_COUNT }));
+  assert.match(line, /Apply —/);
+  assert.doesNotMatch(line, /Repeatedly recalled/);
+});
+
+test('formatMemoryLine does not escalate non-pattern types regardless of injection_count', () => {
+  const line = formatMemoryLine(
+    mk({ type: 'semantic', injection_count: PATTERN_FRAMING_ESCALATION_COUNT + 100 }),
+  );
+  assert.doesNotMatch(line, /Repeatedly recalled/);
+  assert.doesNotMatch(line, /Apply —/);
 });
 
 test('formatWarningBlock includes an actionable directive', () => {
