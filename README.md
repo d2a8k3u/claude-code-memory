@@ -43,6 +43,11 @@ cd claude-memory
 
 The installer builds the MCP server, registers it globally, adds hooks to `~/.claude/settings.json`, and symlinks skills. **Restart Claude Code after installation.**
 
+> **Statusline:** The installer adds a `🧠 N loaded` badge (memories loaded into context this session, over the project corpus size) only if you have **no** `statusLine` configured — it never overwrites an existing one. To add the badge to your own statusline, run it yourself and append the output:
+> ```
+> node /path/to/claude-memory/server/dist/cli.js statusline
+> ```
+
 > **Note:** On first use, the plugin downloads a ~90 MB embedding model ([all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)) from Hugging Face. This happens once and is cached locally. The first session start may take 10-30 seconds depending on your connection.
 
 ### First-run bootstrap (optional)
@@ -87,6 +92,8 @@ SQLite database at `.claude/memory-db/memory.sqlite` inside each project. Includ
 | `/memory-init` | Bootstrap project memory from codebase files (README, package.json, git history, etc.) |
 | `/memory-maintain` | Deduplicate, consolidate, clean junk records, and split large memories |
 | `/memory-graph` | Open the memory graph visualization in your browser at `http://localhost:7337` |
+| `/memory-status` | Print a memory health digest for this project (items / sessions / injections served, embedding coverage, never-injected dead weight) |
+| `/memory-recall` | Toggle automatic recall for this project (`off` / `normal` / `status`). Silences every recall hook without uninstalling; auto-save and the MCP tools stay active |
 
 <details>
 <summary>Architecture</summary>
@@ -111,7 +118,9 @@ claude-memory/
 │   ├── memory-init/              # /memory-init bootstrap skill
 │   └── memory-maintain/          # /memory-maintain cleanup skill
 ├── commands/
-│   └── memory-graph.md           # /memory-graph slash command
+│   ├── memory-graph.md           # /memory-graph slash command
+│   ├── memory-status.md          # /memory-status slash command
+│   └── memory-recall.md          # /memory-recall slash command
 ├── agents/memory-curator.md      # Maintenance sub-agent
 └── hooks/hooks.json.template     # Reference hook config
 ```
