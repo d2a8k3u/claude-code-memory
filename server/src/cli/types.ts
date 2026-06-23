@@ -5,6 +5,8 @@ export type HookInput = {
   tool_output?: string;
   tool_input?: Record<string, unknown>;
   prompt?: string;
+  // Set by Claude Code: 'startup' | 'compact' | 'resume' | 'clear'. Older CC versions omit it.
+  source?: string;
 };
 
 export type HookOutput = {

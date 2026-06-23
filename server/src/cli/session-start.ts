@@ -9,10 +9,11 @@ import { safeParseTags } from '../merge-utils.js';
 import { detectAndStorePatterns } from './pattern-detector.js';
 import { THRESHOLDS, TYPE_RELEVANCE, TYPE_LIMITS_PER_HOOK } from '../thresholds.js';
 import type { ScoringWeights } from '../thresholds.js';
-import { formatBlockWithRelations } from './injection-format.js';
+import { formatBlockWithRelations, formatMemoryLine } from './injection-format.js';
 import { expandByRelations } from './relation-walk.js';
 import { suppressStaleProjectMemories } from './staleness.js';
-import { resetCache, markInjected } from './session-cache.js';
+import { resetCache, markInjected, dedupSet, writeStatusline } from './session-cache.js';
+import { getRecallMode } from './recall-mode.js';
 
 interface SearchChannel {
   query: string;
@@ -94,8 +95,26 @@ export function allocateBudget(sections: ContextSection[]): {
 
 const SESSION_CAPS = TYPE_LIMITS_PER_HOOK.sessionStart;
 
+function emptyStart(): HookOutput {
+  return { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: '' } };
+}
+
 export async function handleSessionStart(db: MemoryDatabase, input: HookInput): Promise<HookOutput> {
   const cwd = input.cwd ?? process.cwd();
+
+  // Per-project recall kill-switch: inject nothing while 'off'. Storing (session-end)
+  // and the MCP tools stay active — silencing recall is not silencing the whole plugin.
+  if (getRecallMode(db) === 'off') return emptyStart();
+
+  // Claude Code re-fires SessionStart on context compaction and resume. These are
+  // continuations of the SAME logical session, not a new boot, so we must NOT run the
+  // per-session maintenance (working wipe, episodic cleanup, importance/relation decay,
+  // session_count bump) or reset the dedup cache — doing so destroys in-flight working
+  // memory and over-decays importance every compaction. Undefined/unknown source is
+  // treated as a normal startup for back-compat with CC versions that omit the field.
+  if (input.source === 'compact' || input.source === 'resume') {
+    return handleSessionContinuation(db);
+  }
 
   warmEmbeddingModel();
   warmRerankerModel();
@@ -275,6 +294,7 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
     db.incrementInjectionCount(allInjectedIds);
     markInjected(cwd, allInjectedIds);
   }
+  writeStatusline(cwd, dedupSet(cwd).size, db.countMemories());
 
   // --- Auto-consolidation ---
   const accumulatedWeight = parseFloat(db.getSessionMeta('consolidation_weight') ?? '0');
@@ -320,6 +340,31 @@ export async function handleSessionStart(db: MemoryDatabase, input: HookInput): 
   );
 
   const context = header + (memoryBlock ? '\n' + memoryBlock : '');
+
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'SessionStart',
+      additionalContext: context,
+    },
+  };
+}
+
+/**
+ * SessionStart re-fired on compaction/resume. Re-injects pattern-biased rules so they
+ * survive the truncated context, but skips every per-session maintenance side-effect and
+ * leaves the dedup cache intact (this block is freshly built and never consulted against
+ * the cache, so prompt-submit / pre-tool-use dedup still holds against pre-compaction IDs).
+ */
+function handleSessionContinuation(db: MemoryDatabase): HookOutput {
+  const sessionCount = parseInt(db.getSessionMeta('session_count') ?? '0', 10);
+  const patterns = db.getTopByImportance('pattern', 0, SESSION_CAPS.pattern);
+
+  const heading = '## Recalled Memories';
+  const lines = patterns.map((m) => formatMemoryLine(m));
+  const block = lines.length > 0 ? `${heading}\n\n${lines.join('\n')}\n` : '';
+
+  const header = `# Project Memory Context (${patterns.length} items loaded, session #${sessionCount}) — Context was compacted — these prior rules still apply:\n`;
+  const context = header + (block ? '\n' + block : '');
 
   return {
     hookSpecificOutput: {
