@@ -1,5 +1,23 @@
 # Claude Code Memory
 
+This project is deprecated and the repository is archived. I continue it as [adaptive-cognitive-memory](https://github.com/d2a8k3u/adaptive-cognitive-memory): one local memory shared by every project on Claude Code, Codex and OpenCode.
+
+To switch on Claude Code:
+
+1. Run `./uninstall.sh` from your clone. It removes the hooks, MCP server, skills and commands that `install.sh` added. It also deletes `~/.claude/CLAUDE_MEMORY.md`, so back that file up first if you edited it. Your memory databases stay in place.
+2. Install adaptive-cognitive-memory (Node.js ≥ 22):
+
+   ```bash
+   claude plugin marketplace add d2a8k3u/construct
+   claude plugin install adaptive-cognitive-memory@construct
+   ```
+
+3. Restart Claude Code and ask Claude to go through the old `.claude/memory-db/memory.sqlite` database in each of your projects, store what is still worth keeping and then delete the `.claude/memory-db/` folders. adaptive-cognitive-memory does not import these databases on its own.
+
+The documentation below describes version 1.2.0.
+
+---
+
 A [Claude Code](https://claude.ai/download) plugin that gives Claude fully automatic, per-project cognitive memory — powered by local embeddings and hybrid search.
 
 ## Features
